@@ -90,14 +90,14 @@ class AdaBelief(Optimizer):
         self.weight_decouple = weight_decouple
         self.rectify = rectify
         self.fixed_decay = fixed_decay
-        if self.weight_decouple:
-            print('Weight decoupling enabled in AdaBelief')
-            if self.fixed_decay:
-                print('Weight decay fixed')
-        if self.rectify:
-            print('Rectification enabled in AdaBelief')
-        if amsgrad:
-            print('AMSGrad enabled in AdaBelief')
+        # if self.weight_decouple:
+        #     print('Weight decoupling enabled in AdaBelief')
+        #     if self.fixed_decay:
+        #         print('Weight decay fixed')
+        # if self.rectify:
+        #     print('Rectification enabled in AdaBelief')
+        # if amsgrad:
+        #     print('AMSGrad enabled in AdaBelief')
 
     def __setstate__(self, state):
         super(AdaBelief, self).__setstate__(state)

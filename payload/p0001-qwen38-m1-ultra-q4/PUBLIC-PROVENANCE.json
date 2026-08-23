@@ -1,0 +1,10 @@
+{
+  "canonical_commit": "201e798e92bed01e0b9bd1fc2f3172dc59a91ed3",
+  "canonical_repo": "stoppingtime/stochastic-problems",
+  "model_id": "SP-P0001-Q38-M1U-Q4-v1",
+  "note": "Generated from an explicit private-repository publication allowlist. No private Git history is included.",
+  "problem_id": "p0001-qwen38-m1-ultra-q4",
+  "public_repo": "stoppingtime/stochastic-belief",
+  "public_root": "Formal/Published/Qwen38M1UltraQ4",
+  "schema": 1
+}

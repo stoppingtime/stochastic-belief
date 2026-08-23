@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "problem_id": "p0001-qwen38-m1-ultra-q4",
+  "model_id": "SP-P0001-Q38-M1U-Q4-v1",
+  "title_zh": "M1 Ultra 上 Qwen3.8-27B Q4_K_M 单 token 解码的带宽上界",
+  "title_en": "Bandwidth Ceiling for Single-Token Qwen3.8-27B Q4_K_M Decode on M1 Ultra",
+  "status": "formalized",
+  "toolchain": "leanprover/lean4:v4.33.0",
+  "scope": {
+    "batch": 1,
+    "speculative_decoding": false,
+    "mtp": false,
+    "kv_dtype": "FP16",
+    "cache_carry_main_instance_bytes": 0,
+    "rate_unit": "milli-token/s"
+  },
+  "external_artifact": {
+    "repo": "6block/Qwen3.8-27B-GGUF",
+    "file": "Qwen3.8-27B-Q4_K_M.gguf",
+    "sha256": "038b8d86da2e388e4c3f5bafdf5a8aa4dcb630861a18d430b3a79c538c1a3beb"
+  },
+  "formal_constants": {
+    "static_representation_floor_bytes": 15660093440,
+    "kv_bytes_per_context_token": 65536,
+    "raw_bus_bytes_per_second": 819200000000,
+    "apple_rated_bytes_per_second": 800000000000,
+    "raw_ctx0_exact_milli_tps": 52311,
+    "apple_ctx0_exact_milli_tps": 51085,
+    "raw_ctx262144_exact_milli_tps": 24945,
+    "apple_ctx262144_exact_milli_tps": 24360
+  },
+  "evidence_boundary": "Lean proves the deduction from the stated model premises; it does not certify Apple's hardware claims, the GGUF tensor layout, or that a concrete runtime realizes the DRAM-traffic lower bound."
+}

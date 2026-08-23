@@ -1,16 +1,28 @@
 # Published stochastic-problems artifacts
 
-This directory is populated only by the trusted workflow stored on the public repository's `master` branch.
+This directory is populated only by trusted workflows stored on the public repository's `master` branch.
 
-The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror its Git history here. Instead, it creates a history-free branch under
+The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror private Git history here. Publication bundles arrive under
 
 ```text
 incoming/stochastic-problems/<problem-id>
 ```
 
-containing only an explicit publication bundle. Incoming branches are treated as untrusted data.
+and are treated as untrusted data.
 
-Before a bundle is copied into this directory, the public workflow independently checks:
+## Two-stage trust boundary
+
+Validation authority and write authority are deliberately separated.
+
+The validation job has only `contents: read`. It materializes only file names already authorized by the public policy, verifies the bundle, and runs the incoming Lean source in a fresh temporary project. It cannot write the public default branch.
+
+Only after that job succeeds does a second job receive `contents: write`. The second job downloads the already-validated artifact, copies data files into `Formal/Published/`, and commits them. It does **not** execute the incoming Lean source.
+
+A separate pull-request workflow performs the same incoming validation with read-only permissions. Another read-only workflow prints the manifest and the actual SHA-256 values of the incoming files; this makes byte-level mirror drift diagnosable without executing incoming code.
+
+## Validation before publication
+
+Before a bundle is copied into this directory, the public side independently checks:
 
 1. the problem ID against a public hard-coded allowlist;
 2. the exact file set and every SHA-256 in `EXPORT-MANIFEST.json`;
@@ -23,6 +35,6 @@ Before a bundle is copied into this directory, the public workflow independently
 9. `leanchecker --fresh` replay of the compiled proof;
 10. `#print axioms` output for the declarations named by the public allowlist.
 
-Each imported problem also receives `SYNC-RECEIPT.json`, which records the private canonical commit, manifest hash, Lean source hash, public destination, and required audit declarations.
+Each imported problem also receives `SYNC-RECEIPT.json`, recording the private canonical commit, manifest hash, Lean source hash, public destination, and required audit declarations.
 
 A new private problem cannot become public merely by changing the private repository: its problem ID and destination must first be added to the public validator's `PUBLICATIONS` table through an ordinary public-repository change.

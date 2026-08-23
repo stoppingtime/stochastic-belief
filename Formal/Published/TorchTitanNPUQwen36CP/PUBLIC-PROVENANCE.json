@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "problem_id": "p0002-torchtitan-npu-qwen36-cp",
+  "model_id": "SP-P0002-TTNPU-Q36-CP-v1",
+  "publication_authority": {
+    "repository": "stoppingtime/stochastic-belief",
+    "root": "Formal/Published/TorchTitanNPUQwen36CP"
+  },
+  "archive_mirror": {
+    "repository": "stoppingtime/stochastic-problems",
+    "root": "Problems/TorchTitanNPUQwen36CP",
+    "direction": "public-to-private-anonymous-read",
+    "private_notes_exported": false
+  },
+  "implementation_evidence": {
+    "repository": "botcanlearn/torchtitan-npu-upstream",
+    "branch": "override-refactor",
+    "commit": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "torchtitan_commit": "c91448d20480c7b294314e68976823050002ebec"
+  },
+  "trust_boundary": "The publication proves a mathematical model and pins the implementation evidence. It does not assert that Lean has parsed or verified the Python, DTensor, HCCL, CANN, Triton, NPU kernel, floating-point, autograd, checkpoint, or optimizer implementations."
+}

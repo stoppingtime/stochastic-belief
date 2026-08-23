@@ -1,0 +1,123 @@
+name: Verify published mathematical problems
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Formal/Published/**'
+      - 'Formal.lean'
+      - 'scripts/check_published_problems.py'
+      - 'lakefile.lean'
+      - 'lean-toolchain'
+      - '.github/workflows/verify-published-problems.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Formal/Published/**'
+      - 'Formal.lean'
+      - 'scripts/check_published_problems.py'
+      - 'lakefile.lean'
+      - 'lean-toolchain'
+      - '.github/workflows/verify-published-problems.yml'
+  schedule:
+    - cron: '29 3 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-published-problems-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: quartet + Lean kernel replay + axiom audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check publication structure and four-manuscript consistency
+        run: python3 scripts/check_published_problems.py
+
+      - name: Install pinned Lean toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            -o /tmp/elan-init.sh
+          for attempt in 1 2 3; do
+            if sh /tmp/elan-init.sh -y --default-toolchain "$(cat lean-toolchain)"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'Lean toolchain installation failed after three attempts.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/lean" --version
+
+      - name: Build every registered formal module
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          lake build
+
+      - name: Fresh kernel replay and axiom audit for every publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          python3 - <<'PY' > /tmp/publication-modules.tsv
+          import json
+          from pathlib import Path
+
+          for manifest in sorted(Path('Formal/Published').glob('*/publication.json')):
+              data = json.loads(manifest.read_text())
+              root = manifest.parent
+              entry = data['lean_entry']
+              module = '.'.join((root / entry).with_suffix('').parts)
+              declarations = ','.join(data['audit_declarations'])
+              print(f'{root}\t{entry}\t{module}\t{declarations}')
+          PY
+
+          while IFS=$'\t' read -r root entry module declarations; do
+            echo "=== ${module} ==="
+            lake env leanchecker --fresh "$module"
+            output="/tmp/axioms-$(echo "$module" | tr '.' '_').txt"
+            lake env lean "$root/$entry" 2>&1 | tee "$output"
+            ROOT="$root" DECLARATIONS="$declarations" OUTPUT="$output" python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text()
+          required = {x for x in os.environ['DECLARATIONS'].split(',') if x}
+          allowed = {'propext', 'Classical.choice', 'Quot.sound'}
+          seen = set()
+          lines = [line for line in text.splitlines() if 'depends on axioms:' in line]
+          if not lines:
+              raise SystemExit(f"{os.environ['ROOT']}: no #print axioms output")
+          for line in lines:
+              name_match = re.match(r"'([^']+)' depends on axioms:", line)
+              axiom_match = re.search(r'depends on axioms:\s*\[(.*)\]\s*$', line)
+              if not name_match or not axiom_match:
+                  raise SystemExit(f'cannot parse axiom line: {line!r}')
+              seen.add(name_match.group(1))
+              used = {x.strip() for x in axiom_match.group(1).split(',') if x.strip()}
+              bad = used - allowed
+              if bad:
+                  raise SystemExit(f'non-standard axioms in {name_match.group(1)}: {sorted(bad)}')
+          missing = required - seen
+          if missing:
+              raise SystemExit(f'missing required axiom declarations: {sorted(missing)}')
+          if 'sorryAx' in text or 'Lean.trustCompiler' in text:
+              raise SystemExit('forbidden trust escape detected')
+          print(f'axiom audit passed: required={len(required)}, emitted={len(lines)}')
+          PY
+          done < /tmp/publication-modules.tsv

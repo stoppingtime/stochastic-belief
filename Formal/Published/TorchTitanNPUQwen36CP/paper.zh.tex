@@ -1,0 +1,307 @@
+% MODEL-ID: SP-P0002-TTNPU-Q36-CP-v1
+% OVERRIDE-COMMIT: 7864d5dc17930667d663bbadd1ce2bc722de2753
+% TORCHTITAN-COMMIT: c91448d20480c7b294314e68976823050002ebec
+% CP-DEGREE: 4
+% GLOBAL-SEQUENCE-LENGTH: 32768
+% LOCAL-SEQUENCE-LENGTH: 8192
+% FULL-ATTN-Q-HEADS: 24
+% FULL-ATTN-KV-HEADS: 4
+% GDN-QK-HEADS: 16
+% GDN-V-HEADS: 48
+
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb,mathtools,amsthm,booktabs,geometry,hyperref,microtype,array}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newtheorem{theorem}{定理}
+\newtheorem{lemma}{引理}
+\newtheorem{corollary}{推论}
+\newcommand{\Fin}{\operatorname{Fin}}
+\newcommand{\CP}{\operatorname{CP}}
+\newcommand{\SeqToHead}{\operatorname{SequenceToHead}}
+\newcommand{\HeadToSeq}{\operatorname{HeadToSequence}}
+
+\title{TorchTitan-NPU \texttt{override-refactor} 中\\Qwen3.6 Context Parallel 的语义正确性}
+\author{Model ID: \texttt{SP-P0002-TTNPU-Q36-CP-v1}}
+\date{2026-08-24}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文形式化研究 TorchTitan-NPU 固定代码版本中 Qwen3.6 Context Parallel 的布局语义。实现最初让每个 CP rank 持有一段序列和全部 head，随后把 Q、K、V 以及 Gated DeltaNet 的投影重新分布为“部分 head、完整逻辑序列”，在该视图上运行 full attention 或 GDN，再恢复为按序列分片。证明对象固定为 \texttt{override-refactor} 提交 \texttt{7864d5dc17930667d663bbadd1ce2bc722de2753}，以及其固定的 TorchTitan 提交 \texttt{c91448d20480c7b294314e68976823050002ebec}。
+
+我们把通信抽象为有限坐标转置
+\[
+(s,\ell,h,r)\longmapsto(h,s,\ell,r),
+\]
+其中 $s$、$h$ 分别是序列 rank 与 head rank，$\ell$ 是本地序列位置，$r$ 是本地 head。Lean 4 证明正向与逆向转置互为反函数；进一步证明，对任何只读取本 head 完整序列的精确算子 $F$，均有
+\[
+\HeadToSeq\bigl(F_{\mathrm{head}}(\SeqToHead(x))\bigr)=F_{\mathrm{ref}}(x).
+\]
+该命题不要求 $F$ 线性、无状态或只看有限窗口，因此在布局层同时覆盖 full attention 与 Gated DeltaNet。
+
+对于变长打包元数据，设本地连续片段的文档起点、片段起点和右开端点分别为 $d,a,b$，且 $d\le a<b$。Lean 证明代码采用的 reset 条件满足
+\[
+b-a=b-d\iff a=d,
+\]
+并证明 $d+j\;(0\le j<b-d)$ 恰好枚举因果 K/V 前缀 $[d,b)$。结论以实现契约为前提：DTensor/HCCL 必须实现所建模的坐标转置，NPU attention 与 GDN kernel 必须实现其声明的 head-local 数学函数。本文不把该条件定理扩大成对 CANN、Triton、BF16、autograd、optimizer、checkpoint 或训练收敛的验证。
+\end{abstract}
+
+\section{问题和版本边界}
+
+本文不研究一个抽象的“任意 Qwen CP”，而是研究可复现的固定实现。证据版本如下：
+
+\begin{center}
+\begin{tabular}{p{0.34\linewidth}p{0.58\linewidth}}
+\toprule
+对象 & 固定值 \\
+\midrule
+TorchTitan-NPU 镜像 & \texttt{botcanlearn/torchtitan-npu-upstream} \\
+分支 & \texttt{override-refactor} \\
+提交 & \texttt{7864d5dc17930667d663bbadd1ce2bc722de2753} \\
+Git tree & \texttt{a2083d3d601007d3a47a7200022d55ee89f90608} \\
+TorchTitan 提交 & \texttt{c91448d20480c7b294314e68976823050002ebec} \\
+Lean & 4.33.0，仅导入 \texttt{Init} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+仓库使用 \texttt{qwen3\_5} 目录承载 Qwen3.5/3.6 共用实现；\texttt{varlen\_attention.py} 的 override 说明明确写为 ``Qwen3.5/3.6 Context Parallel''。本文沿用工程侧的 Qwen3.6 名称，但所有论断都以完整 commit 和文件 blob 为准。
+
+固定配置 \texttt{qwen35\_27b\_long\_text\_sft} 设定
+\[
+P=4,\qquad L=32768,\qquad S=L/P=8192,
+\]
+使用 varlen attention，并令 \texttt{context\_parallel\_load\_balancer=None}。因此主定理处理连续、等长的序列分片，不把当前配置未启用的 head-tail 重排并入结论。
+
+证明分为三层：布局交换是双射；head-local 算子与交换可交换；变长片段的 reset 与 K 前缀构造正确。Python、DTensor、HCCL、CANN 和 Triton 是否满足这些数学契约，仍需独立工程证据。
+
+\section{实现到数学模型的对应}
+
+\subsection{sequence/head 交换}
+
+\texttt{parallelize.py} 中，\texttt{sequence\_to\_head\_shard} 把本地 tensor 解释为序列维 \texttt{Shard(1)}，再重分布到 head 维。\texttt{head\_to\_sequence\_shard} 执行反向操作。\texttt{exchange\_sequence\_heads} 对多个投影 tensor 分别沿 head 维切块，按 rank 打包，执行一次重分布，再按原 tensor 的局部 head 宽度拆开。
+
+通信前，一个 rank 持有全体 head 的一段序列；通信后，一个 rank 持有部分 head 的完整序列。临时拼接的缓冲布局不是语义对象，真正需要证明的是每个逻辑元素的坐标如何变化。
+
+\subsection{full attention 与 GDN 的共同结构}
+
+full attention 与 Gated DeltaNet 的序列算法不同。前者计算因果加权组合，后者运行因果卷积与 gated-delta recurrence。二者在 CP 结构上共有一点：一个输出 head 只依赖该 head 的完整逻辑序列，不读取其他输出 head。因此可以用一个任意 head-local 函数表示，既不假设线性，也不假设有限窗口。
+
+Q、K、V、decay、beta 及输出 gate 的投影是 token-local 映射。形式化文件单独证明逐点映射与坐标转置可交换，避免把这一步含混地并入主定理。
+
+\section{有限坐标上的两种布局}
+
+设 $P$ 为 CP degree，$S$ 为每个 sequence rank 的本地长度，$H$ 为每个 head rank 的本地 head 数，$\alpha$ 为元素类型。按序列分片的逻辑 tensor 是函数
+\[
+X:\Fin(P)\times\Fin(S)\times\Fin(P)\times\Fin(H)\to\alpha,
+\]
+坐标写作 $(s,\ell,h,r)$。按 head 分片的同一 tensor 写为
+\[
+Y:\Fin(P)\times\Fin(P)\times\Fin(S)\times\Fin(H)\to\alpha,
+\]
+坐标写作 $(h,s,\ell,r)$。
+
+定义
+\begin{align}
+(TX)(h,s,\ell,r)&=X(s,\ell,h,r), \tag{1}\\
+(T^{-1}Y)(s,\ell,h,r)&=Y(h,s,\ell,r). \tag{2}
+\end{align}
+
+使用 $\Fin(n)$ 意味着越界索引无法成为合法输入，边界不是运行时约定，而是类型的一部分。
+
+\begin{theorem}[sequence layout 往返恒等]
+对任意 $X$，有
+\[
+T^{-1}(TX)=X.
+\]
+\end{theorem}
+
+\begin{proof}
+任取合法坐标 $(s,\ell,h,r)$。由定义，
+\[
+(T^{-1}(TX))(s,\ell,h,r)=(TX)(h,s,\ell,r)=X(s,\ell,h,r).
+\]
+两个函数在任意输入上相等，故由函数外延性得到结论。
+\end{proof}
+
+\begin{theorem}[head layout 往返恒等]
+对任意 $Y$，有
+\[
+T(T^{-1}Y)=Y.
+\]
+\end{theorem}
+
+证明与前一定理对称。两个方向共同给出双射。只比较元素总数不能排除“重复一个、遗漏一个”的错误；互逆函数可以排除。
+
+Lean 中相应声明为 \texttt{headToSequence\_sequenceToHead}、\texttt{sequenceToHead\_headToSequence} 与逐元素版本 \texttt{roundTrip\_preserves\_entry}。
+
+\section{Head-local 算子的 CP 等价性}
+
+固定 head 坐标 $(h,r)$，其完整序列定义为
+\[
+x_{h,r}(s,\ell)=X(s,\ell,h,r).
+\]
+设
+\[
+F:(\Fin(P)\times\Fin(S)\to\alpha)
+\to(\Fin(P)\times\Fin(S)\to\beta)
+\]
+是任意 head-local 精确算子。
+
+参考执行定义为
+\[
+(F_{\mathrm{ref}}X)(s,\ell,h,r)=F(x_{h,r})(s,\ell). \tag{3}
+\]
+CP 执行先应用 $T$，在 head layout 上逐 head 应用 $F$，再应用 $T^{-1}$。
+
+\begin{theorem}[head-local Context Parallel 语义等价]
+对任意 $F$ 与 $X$，
+\[
+T^{-1}\bigl(F_{\mathrm{head}}(TX)\bigr)=F_{\mathrm{ref}}X. \tag{4}
+\]
+\end{theorem}
+
+\begin{proof}
+任取 $(s,\ell,h,r)$。CP 路径送入 $F$ 的序列为
+\[
+(s',\ell')\mapsto(TX)(h,s',\ell',r).
+\]
+由式 (1)，该函数逐点等于
+\[
+(s',\ell')\mapsto X(s',\ell',h,r)=x_{h,r}.
+\]
+所以恢复后的输出为 $F(x_{h,r})(s,\ell)$，恰为式 (3) 的参考输出。再用函数外延性即得式 (4)。
+\end{proof}
+
+该定理在 Lean 中对任意类型、任意 $P,S,H$ 和任意函数 $F$ 成立。它覆盖的是布局语义：若 fused attention 或 GDN kernel 正确实现所声明的 per-head 函数，CP 交换不会改变该函数。
+
+\subsection{逐 token 映射}
+
+对任意 $f:\alpha\to\beta$，定义逐元素映射。由坐标定义直接得到
+\[
+T(f(X))=f(TX),\qquad T^{-1}(f(Y))=f(T^{-1}Y).
+\]
+Lean 声明 \texttt{sequenceToHead\_map\_commutes} 与 \texttt{headToSequence\_map\_commutes} 证明这一步。于是投影、交换、head-local kernel、逆交换和输出映射可以逐段组合。
+
+\section{Backward 的有限推论}
+
+式 (4) 是 forward 函数的严格相等，而非某个输入上的近似。任何外延一致的语义观察者都不能区分两者。若数学导数构造 $D$ 只依赖函数语义，则
+\[
+D(T^{-1}\circ F_{\mathrm{head}}\circ T)=D(F_{\mathrm{ref}}). \tag{5}
+\]
+Lean 用更一般的 \texttt{every\_extensional\_observer\_agrees} 表述这一点。
+
+式 (5) 不等于验证 PyTorch/NPU backward。实际梯度正确还要求 kernel backward 是 forward 的导数、collective backward 实现相应线性映射、混合精度和规约误差符合容差、hook 与 activation checkpoint 没有断开梯度。optimizer 未执行或 checkpoint 保存错误也不在该推论内。因此，“保存权重仍与初始权重相同”不能仅凭布局定理排除。
+
+\section{变长打包片段的元数据}
+
+设某文档从全局位置 $d$ 开始，一个 CP rank 持有的连续局部片段为半开区间 $[a,b)$，其中
+\[
+d\le a<b.
+\]
+本地 Q 长度为
+\[
+q=b-a, \tag{6}
+\]
+而当前查询所需的同文档因果 K/V 前缀为 $[d,b)$，长度为
+\[
+k=b-d. \tag{7}
+\]
+
+\begin{theorem}[reset 判定充要]
+在 $d\le a<b$ 下，
+\[
+q=k\iff a=d. \tag{8}
+\]
+\end{theorem}
+
+\begin{proof}
+代入式 (6)、(7)，左侧为 $b-a=b-d$。在给定次序前提下，两边均为普通自然数差；相同被减数所得差相等，当且仅当减数相等。反向由代入立即成立。
+\end{proof}
+
+该条件对应代码比较本地 Q run 长度与 K prefix 长度，从而识别真正的 document start。
+
+定义生成的 K 索引
+\[
+K(j)=d+j,\qquad 0\le j<b-d. \tag{9}
+\]
+
+\begin{theorem}[因果前缀索引精确]
+\[
+\{K(j)\mid 0\le j<b-d\}
+=\{x\in\mathbb N\mid d\le x<b\}. \tag{10}
+\]
+\end{theorem}
+
+\begin{proof}
+若 $0\le j<b-d$，则 $d\le d+j<b$，故生成索引可靠。反之，任意 $d\le x<b$，取 $j=x-d$，则 $0\le j<b-d$ 且 $d+j=x$，故不遗漏任何索引。
+\end{proof}
+
+Lean 的 \texttt{prefixKey\_exact} 同时证明两个方向，明确使用右开区间，既排除错误包含 $b$，也保证保留 $b-1$。
+
+\section{固定 CP=4 实例}
+
+配置满足
+\[
+32768=4\times8192.
+\]
+相关 head 数的分片为：
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+head 类型 & 全局数量 & 每个 head rank \\
+\midrule
+full-attention Q & 24 & 6 \\
+full-attention KV & 4 & 1 \\
+GDN Q/K & 16 & 4 \\
+GDN V & 48 & 12 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Lean 定理 \texttt{concrete\_sequence\_partition} 与 \texttt{concrete\_head\_partitions} 检查商与余数。若 head 数不能整除 CP degree，实际系统需要复制、补齐或不等长 shard，本文的等长乘积坐标模型必须相应修改。
+
+\section{形式对象与实现模块的契约}
+
+\begin{center}
+\begin{tabular}{p{0.24\linewidth}p{0.35\linewidth}p{0.33\linewidth}}
+\toprule
+数学对象 & 实现位置 & 尚需验证的桥接前提 \\
+\midrule
+$T$ & \texttt{sequence\_to\_head\_shard}、\texttt{exchange\_sequence\_heads} & DTensor/HCCL 实现坐标转置 \\
+$T^{-1}$ & \texttt{head\_to\_sequence\_shard} & 反向交换确为逆映射 \\
+attention head 算子 & \texttt{AscVarlenAttention.forward} & TND fused attention 语义正确 \\
+GDN head 算子 & \texttt{ContextParallelGatedDeltaNet.forward} & 卷积、递归、reset 与 backward 正确 \\
+片段 $(d,a,b)$ & \texttt{CPVarlenMetadata.from\_global} & 全局/局部位置映射正确 \\
+reset 条件 & \texttt{build\_sequence\_metadata} & 被比较长度属于同一片段 \\
+前缀 $[d,b)$ & \texttt{k\_global\_gather\_indices} & gather 按给定索引取值且顺序正确 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{剩余工程验证}
+
+形式定理应与下列测试配合使用。
+
+\paragraph{纯索引测试。}
+用整数值编码 tensor 种类、token、rank 与 head，逐元素检查 sequence$\to$head$\to$sequence 恒等；覆盖不同 CP degree 和多个 tensor 同时 pack/split。
+
+\paragraph{kernel/reference 对齐。}
+在小型 FP64/FP32 输入上分别比较 full attention、GDN、因果卷积的 forward、输入梯度和参数梯度。BF16 应报告明确容差，而不能混入精确语义测试。
+
+\paragraph{短序列边界穷举。}
+枚举文档划分与 CP 切点，验证 reset 恰在文档起点，K/V 恰为同文档因果前缀，并覆盖长度 1 文档及切点落在边界内外的情况。
+
+\paragraph{训练状态测试。}
+直接断言预期参数具有非零梯度、optimizer step 后参数变化、checkpoint 等于内存中的 step 后状态，以及恢复训练的下一步与不中断参考轨迹在容差内一致。
+
+\section{结论}
+
+本文机器验证了 Qwen3.6 CP 布局的离散语义核心：sequence/head 交换是双射；任意 head-local 精确算子与交换可交换；变长片段 reset 判定具有充要性；K/V 前缀索引与目标半开区间完全相等。只要具体 collective、kernel 与元数据映射满足各自桥接契约，CP forward 就与未切分 reference 是同一个数学函数。
+
+该结论能够排除一大类由 rank/head/sequence 索引错位造成的语义错误，并为实现测试给出明确契约。它没有排除数值 kernel、autograd、optimizer、checkpoint 或运行时故障；这些问题应由相应层级的证据处理，而不应被悄悄写进布局定理的结论。
+
+\end{document}

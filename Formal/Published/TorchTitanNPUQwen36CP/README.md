@@ -43,3 +43,5 @@ lake env lean Formal/Published/TorchTitanNPUQwen36CP/Proof.lean
 ```
 
 The theorem does not certify NPU kernels, collectives, floating-point rounding, autograd, optimizer stepping or training convergence. Those boundaries are stated in all four manuscripts and in the evidence ledger.
+
+<!-- CI-only replay marker; this branch is not intended for merge. -->

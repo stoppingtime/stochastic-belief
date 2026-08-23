@@ -1,0 +1,50 @@
+{
+  "audit_declarations": [
+    "Qwen38M1Ultra.threshold_impossible",
+    "Qwen38M1Ultra.certifyExactCeiling",
+    "Qwen38M1Ultra.raw_ctx_0_exact",
+    "Qwen38M1Ultra.apple_rated_ctx_0_exact",
+    "Qwen38M1Ultra.audit_conclusion"
+  ],
+  "canonical_commit": "201e798e92bed01e0b9bd1fc2f3172dc59a91ed3",
+  "canonical_repo": "stoppingtime/stochastic-problems",
+  "files": [
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/PUBLIC-PROVENANCE.json",
+      "sha256": "65f287a1493604ba0ffa8d4cd95a426b6dda7109a76262f34e0a21325afc838c"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/Proof.lean",
+      "sha256": "981e0065c430473f01438ffa9e570190a40643e2148395a33767e452fd8f6685"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/evidence.md",
+      "sha256": "f7927e9d2d4e3dad0fec3846996f41ffb852b2d47abe42483882e4afdba51e49"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/metadata.json",
+      "sha256": "4be2c53901289160942385d80824e3498fb89922947dfc97e3d08038c6ac1524"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/paper.en.md",
+      "sha256": "f508977d031587cbeae8bc24d0c067639a6011c220935fba15cf5e1c2f294ca9"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/paper.en.tex",
+      "sha256": "50b6d65bb7ccbccf777daab7cc45a85bebb7d9e0b1a3c6b5b979003f8dff20c2"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/paper.zh.md",
+      "sha256": "a22a0e1832bc747d4799d34567c6b8f86612cc28a8921411eff37492f5191378"
+    },
+    {
+      "path": "payload/p0001-qwen38-m1-ultra-q4/paper.zh.tex",
+      "sha256": "370c15b50b698d29575263ffb6658483051dcfaee1340d30e313fb8d3d05aefd"
+    }
+  ],
+  "lean_entry": "payload/p0001-qwen38-m1-ultra-q4/Proof.lean",
+  "problem_id": "p0001-qwen38-m1-ultra-q4",
+  "public_repo": "stoppingtime/stochastic-belief",
+  "schema": 1,
+  "toolchain": "leanprover/lean4:v4.33.0"
+}

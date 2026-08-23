@@ -1,0 +1,93 @@
+name: Monthly Lean proof attestation
+
+on:
+  schedule:
+    - cron: '17 4 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monthly-lean-attestation
+  cancel-in-progress: false
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Lean toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain "$(cat lean-toolchain)"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Verify proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          lean --version | tee /tmp/lean-version.txt
+          lake build
+          lake env lean4checker --fresh Formal.Qwen38M1UltraBound
+          lake env lean Formal/Qwen38M1UltraBound.lean 2>&1 | tee /tmp/lean-audit.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('/tmp/lean-audit.txt').read_text()
+          allowed = {'propext', 'Classical.choice', 'Quot.sound'}
+          lines = [line for line in text.splitlines() if 'depends on axioms:' in line]
+          if not lines:
+              raise SystemExit('no axiom output found')
+          for line in lines:
+              m = re.search(r'depends on axioms:\s*\[(.*)\]\s*$', line)
+              if not m:
+                  raise SystemExit(f'cannot parse axiom line: {line!r}')
+              used = {x.strip() for x in m.group(1).split(',') if x.strip()}
+              bad = used - allowed
+              if bad:
+                  raise SystemExit(f'non-standard axioms: {sorted(bad)}')
+          if 'sorryAx' in text or 'Lean.trustCompiler' in text:
+              raise SystemExit('forbidden trust escape detected')
+          PY
+
+      - name: Write monthly attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          month="$(date -u +%Y-%m)"
+          stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          proof_sha="$(sha256sum Formal/Qwen38M1UltraBound.lean | awk '{print $1}')"
+          toolchain="$(cat lean-toolchain)"
+          lean_version="$(cat /tmp/lean-version.txt)"
+          mkdir -p Formal/attestations
+          cat > "Formal/attestations/${month}.md" <<EOF2
+          # Lean verification attestation — ${month}
+
+          - verified_at_utc: \`${stamp}\`
+          - repository_commit: \`${GITHUB_SHA}\`
+          - source_sha256: \`${proof_sha}\`
+          - toolchain: \`${toolchain}\`
+          - runtime: \`${lean_version}\`
+          - lake_build: \`pass\`
+          - lean4checker_fresh: \`pass\`
+          - axiom_audit: \`pass\`
+          - workflow_run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF2
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formal/attestations
+          if git diff --cached --quiet; then
+            echo 'No attestation change.'
+          else
+            git commit -m "chore(formal): ${month} Lean attestation"
+            git push
+          fi

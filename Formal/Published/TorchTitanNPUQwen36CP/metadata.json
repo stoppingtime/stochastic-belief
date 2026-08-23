@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "problem_id": "p0002-torchtitan-npu-qwen36-cp",
+  "model_id": "SP-P0002-TTNPU-Q36-CP-v1",
+  "title_zh": "TorchTitan-NPU override-refactor 中 Qwen3.6 Context Parallel 的条件正确性证明",
+  "title_en": "Conditional Correctness of Qwen3.6 Context Parallel in TorchTitan-NPU override-refactor",
+  "status": "formalized-conditional",
+  "toolchain": "leanprover/lean4:v4.33.0",
+  "scope": {
+    "repository": "cann/torchtitan-npu",
+    "mirror": "botcanlearn/torchtitan-npu-upstream",
+    "branch": "override-refactor",
+    "commit": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "configuration": "qwen35_27b_long_text_sft",
+    "context_parallel_degree": 4,
+    "global_sequence_length": 32768,
+    "local_sequence_length": 8192,
+    "covered_transport": "sequence-shard <-> head-block-shard",
+    "covered_operators": [
+      "variable-length full attention",
+      "Gated DeltaNet"
+    ],
+    "not_covered": [
+      "DTensor/HCCL implementation correctness",
+      "fused-kernel numerical equivalence",
+      "metadata construction for every runtime input",
+      "autograd and optimizer implementation correctness"
+    ]
+  },
+  "anchors": {
+    "MODEL-ID": "SP-P0002-TTNPU-Q36-CP-v1",
+    "UPSTREAM-COMMIT": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "CP-DEGREE": "4",
+    "GLOBAL-SEQ-LEN": "32768",
+    "LOCAL-SEQ-LEN": "8192",
+    "FULL-Q-HEADS": "24",
+    "FULL-KV-HEADS": "4",
+    "GDN-QK-HEADS": "16",
+    "GDN-V-HEADS": "48"
+  },
+  "source_blobs": {
+    "torchtitan_npu/models/qwen3_5/config_registry.py": "2448b69407135cfb913ee2fe194f029776c1c9ec",
+    "torchtitan_npu/override/qwen3_5/parallelize.py": "1600dbe56d3842c480319c8285c6abed135e1d8d",
+    "torchtitan_npu/override/qwen3_5/varlen_attention.py": "ac81ee49016efefb6bef75b71b6eb7aa7ecadee1",
+    "torchtitan_npu/override/qwen3_5/gated_delta.py": "35eaec0d1032938d15ee3229f7aa657a6d0726b8"
+  },
+  "quality_contract": {
+    "minimum_characters": 6000,
+    "required_strings": {
+      "paper.zh.md": [
+        "外部事实",
+        "一般等价定理",
+        "形式验证",
+        "解释边界",
+        "32768",
+        "24=4",
+        "16=4"
+      ],
+      "paper.en.md": [
+        "External evidence",
+        "General equivalence theorem",
+        "Formal verification",
+        "Interpretation boundary",
+        "32768",
+        "24=4",
+        "16=4"
+      ]
+    }
+  },
+  "evidence_boundary": "Lean proves the transport and composition theorem inside the stated rank-factorized model. It does not certify that DTensor, HCCL, CANN fused attention, the Triton-Ascend GDN kernel, or runtime metadata construction realize those premises."
+}

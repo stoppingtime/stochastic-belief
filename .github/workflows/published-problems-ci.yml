@@ -1,0 +1,117 @@
+name: Published formal problems
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Formal/Published/**'
+      - 'scripts/check_published.py'
+      - '.github/workflows/published-problems-ci.yml'
+      - 'lean-toolchain'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Formal/Published/**'
+      - 'scripts/check_published.py'
+      - '.github/workflows/published-problems-ci.yml'
+      - 'lean-toolchain'
+  schedule:
+    - cron: '29 6 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: quartet + isolated Lean replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check public manuscripts and manifests
+        run: python3 scripts/check_published.py
+
+      - name: Install pinned Lean toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if curl --proto '=https' --tlsv1.2 -sSf \
+              https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              -o /tmp/elan-init.sh &&
+              sh /tmp/elan-init.sh -y --default-toolchain "$(cat lean-toolchain)"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'Lean toolchain installation failed after three attempts.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/lean" --version
+
+      - name: Build, replay, and audit each published proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          for proof in Formal/Published/*/Proof.lean; do
+            problem="$(basename "$(dirname "$proof")")"
+            work="/tmp/public-proof-${problem}"
+            rm -rf "$work"
+            mkdir -p "$work/Generated"
+            cp "$proof" "$work/Generated/Proof.lean"
+            cp lean-toolchain "$work/lean-toolchain"
+            cat > "$work/lakefile.lean" <<'EOF'
+          import Lake
+          open Lake DSL
+          package published_problem
+          @[default_target]
+          lean_lib Generated
+          EOF
+            printf '%s\n' 'import Generated.Proof' > "$work/Generated.lean"
+
+            (
+              cd "$work"
+              lake build
+              lake env leanchecker --fresh Generated.Proof
+              lake env lean Generated/Proof.lean 2>&1 |
+                tee "/tmp/axioms-${problem}.txt"
+            )
+
+            PROBLEM_DIR="$(dirname "$proof")" \
+            AXIOMS="/tmp/axioms-${problem}.txt" \
+            python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          problem = Path(os.environ["PROBLEM_DIR"])
+          publication = json.loads((problem / "publication.json").read_text())
+          required = set(publication["audit_declarations"])
+          text = Path(os.environ["AXIOMS"]).read_text()
+          allowed = {"propext", "Classical.choice", "Quot.sound"}
+          seen = set()
+          lines = [line for line in text.splitlines() if "depends on axioms:" in line]
+          if not lines:
+              raise SystemExit(f"{problem}: no #print axioms output")
+          for line in lines:
+              name = re.match(r"'([^']+)' depends on axioms:", line)
+              axioms = re.search(r"depends on axioms:\s*\[(.*)\]\s*$", line)
+              if not name or not axioms:
+                  raise SystemExit(f"{problem}: cannot parse {line!r}")
+              seen.add(name.group(1))
+              used = {x.strip() for x in axioms.group(1).split(",") if x.strip()}
+              bad = used - allowed
+              if bad:
+                  raise SystemExit(f"{problem}: non-standard axioms {sorted(bad)}")
+          missing = required - seen
+          if missing:
+              raise SystemExit(f"{problem}: declarations not audited {sorted(missing)}")
+          if "sorryAx" in text or "Lean.trustCompiler" in text:
+              raise SystemExit(f"{problem}: forbidden trust escape")
+          print(f"{problem}: axiom audit passed for {len(required)} required declarations")
+          PY
+          done

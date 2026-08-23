@@ -1,28 +1,50 @@
-# Published stochastic-problems artifacts
+# Published formal problems
 
-This directory is populated only by the trusted workflow stored on the public repository's `master` branch.
+This directory is the **public canonical release set** for human-readable
+mathematical models and machine-checkable Lean proofs.
 
-The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror its Git history here. Instead, it creates a history-free branch under
+Each released problem contains:
 
 ```text
-incoming/stochastic-problems/<problem-id>
+paper.zh.tex
+paper.en.tex
+paper.zh.md
+paper.en.md
+Proof.lean
+metadata.json
+publication.json
+evidence.md
 ```
 
-containing only an explicit publication bundle. Incoming branches are treated as untrusted data.
+The Chinese and English manuscripts share machine-readable anchors, but each
+language is written as an independent mathematical exposition rather than a
+sentence-by-sentence translation.
 
-Before a bundle is copied into this directory, the public workflow independently checks:
+## Credential-free repository relationship
 
-1. the problem ID against a public hard-coded allowlist;
-2. the exact file set and every SHA-256 in `EXPORT-MANIFEST.json`;
-3. absence of nested paths, symlinks, executable workflow files, private-key markers, and unapproved file types;
-4. the four synchronized human manuscripts: Chinese/English LaTeX and Chinese/English Markdown;
-5. their shared `MODEL-ID` and numerical anchors against `metadata.json`;
-6. the public destination and private canonical commit recorded by `PUBLIC-PROVENANCE.json`;
-7. that `Proof.lean` imports only Lean Core `Init` and contains none of the prohibited trust escapes;
-8. `lake build` in a fresh temporary project;
-9. `leanchecker --fresh` replay of the compiled proof;
-10. `#print axioms` output for the declarations named by the public allowlist.
+`stoppingtime/stochastic-belief` is canonical for released artifacts.
+`stoppingtime/stochastic-problems` is the private research archive. Its own
+scheduled workflow clones this public repository over anonymous HTTPS and
+stores a byte-for-byte release mirror under `PublicMirror/`.
 
-Each imported problem also receives `SYNC-RECEIPT.json`, which records the private canonical commit, manifest hash, Lean source hash, public destination, and required audit declarations.
+This direction requires no deploy key, PAT, GitHub App private key, or
+cross-repository secret:
 
-A new private problem cannot become public merely by changing the private repository: its problem ID and destination must first be added to the public validator's `PUBLICATIONS` table through an ordinary public-repository change.
+```text
+public canonical release
+        |
+        | anonymous read
+        v
+private PublicMirror
+```
+
+Private drafts and review notes never enter the public repository. There is no
+automated private-to-public write path; publication is an explicit review
+action in the public repository, while archival synchronization is automatic.
+
+## Verification
+
+The public workflow checks the four-manuscript contract, model anchors,
+evidence boundary, publication allowlist, an isolated `lake build`,
+`leanchecker --fresh`, and the declared `#print axioms` targets for every
+problem.

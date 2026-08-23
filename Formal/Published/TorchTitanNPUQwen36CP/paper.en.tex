@@ -1,0 +1,347 @@
+% MODEL-ID: SP-P0002-TTNPU-Q36-CP-v1
+% UPSTREAM-COMMIT: 7864d5dc17930667d663bbadd1ce2bc722de2753
+% CP-DEGREE: 4
+% GLOBAL-SEQ-LEN: 32768
+% LOCAL-SEQ-LEN: 8192
+% FULL-Q-HEADS: 24
+% FULL-KV-HEADS: 4
+% GDN-QK-HEADS: 16
+% GDN-V-HEADS: 48
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,mathtools,booktabs,geometry,hyperref,microtype}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newcommand{\CP}{\operatorname{CP}}
+\newcommand{\Tmap}{\mathcal T}
+\newcommand{\Kernel}{\mathcal K}
+\title{Conditional Correctness of Qwen3.6 Context Parallel in TorchTitan-NPU \texttt{override-refactor}}
+\author{Model ID: SP-P0002-TTNPU-Q36-CP-v1}
+\date{2026-08-24}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We formalize the Context Parallel (CP) transport used by the Qwen3.5/3.6
+long-text path in the \texttt{override-refactor} branch of
+\texttt{cann/torchtitan-npu}, frozen at commit
+\texttt{7864d5dc17930667d663bbadd1ce2bc722de2753}. The reviewed configuration
+shards a sequence of length $32768$ over CP degree $4$, leaving $8192$ tokens
+on each sequence rank. It applies CP both to variable-length TND full attention
+and to Gated DeltaNet (GDN), which includes causal convolution and recurrent
+state updates.
+
+The proof separates transport, local operator semantics, and the code-to-model
+bridge. Lean 4 verifies that changing from sequence sharding to head-block
+sharding is a rank-axis transpose, that the inverse transform restores the
+original tensor, and that packing several projected tensors before the
+collective is componentwise transparent. Consequently, if the real collective
+implements this lossless transpose, if the local fused kernel implements the
+same head-block-separable function as the non-CP baseline, and if both paths
+receive identical global sequence metadata, then the CP output is pointwise
+equal to the dense output. The theorem covers full attention and GDN, but does
+not certify DTensor, HCCL, CANN kernels, metadata construction, floating-point
+rounding, or distributed backward.
+\end{abstract}
+
+\section{External Evidence and Reviewed Scope}
+
+The reviewed source paths are:
+\begin{verbatim}
+torchtitan_npu/models/qwen3_5/config_registry.py
+torchtitan_npu/override/qwen3_5/parallelize.py
+torchtitan_npu/override/qwen3_5/varlen_attention.py
+torchtitan_npu/override/qwen3_5/gated_delta.py
+\end{verbatim}
+The Python package remains named \texttt{qwen3\_5}, while the override
+description explicitly refers to ``Qwen3.5/3.6 Context Parallel.'' We retain
+the exact paths and use the user-facing name Qwen3.6.
+
+The long-text configuration fixes
+\[
+L=32768,\qquad P=4,\qquad L_{\mathrm{local}}=8192.
+\]
+It loads both the variable-length attention CP override and the GDN CP
+override.
+
+\subsection{Transport Skeleton}
+
+\texttt{sequence\_to\_head\_shard} declares a local tensor as sharded along
+the sequence dimension and redistributes it to head sharding.
+\texttt{head\_to\_sequence\_shard} performs the reverse redistribution.
+\texttt{exchange\_sequence\_heads} packs head chunks from several projections
+before communication. Packing may reduce collective calls, but it must not
+change ownership or order of elements.
+
+\subsection{Full Attention}
+
+The full-attention path performs optional GQA K/V handling, exchanges Q/K/V
+from sequence sharding to head-block sharding, invokes TND fused attention on
+the complete sequence, and exchanges the output back. The reviewed head counts
+are
+\[
+H_Q=24,\qquad H_{KV}=4.
+\]
+With $P=4$, each rank receives
+\[
+H_Q^{\mathrm{local}}=6,\qquad H_{KV}^{\mathrm{local}}=1.
+\]
+Thus one local KV head aligns with six local Q heads.
+
+\subsection{Gated DeltaNet}
+
+The GDN path exchanges Q, K, V, decay, and beta. It then executes
+segment-aware causal convolution and recurrent updates over the complete
+sequence, before returning the output to sequence sharding. Its head counts
+are
+\[
+H_{QK}=16,\qquad H_V=48,
+\]
+which become 4 and 12 heads per CP rank. The formal model treats the entire
+contiguous head chunk owned by one rank as an abstract payload, rather than
+pretending that all projections have the same scalar-head shape.
+
+\section{Mathematical Model and Assumptions}
+
+Represent a global sequence position by
+\[
+(r_s,i),\qquad r_s\in\{0,\ldots,P-1\},\quad
+i\in\{0,\ldots,L_{\mathrm{local}}-1\},
+\]
+and a global head block by
+\[
+r_h\in\{0,\ldots,P-1\}.
+\]
+In sequence-sharded layout, write an element as $X[r_s,i,r_h]$. Define the
+sequence-to-head transform by
+\[
+(\Tmap X)[r_h,r_s,i]=X[r_s,i,r_h], \tag{1}
+\]
+and its inverse by
+\[
+(\Tmap^{-1}Y)[r_s,i,r_h]=Y[r_h,r_s,i]. \tag{2}
+\]
+
+\paragraph{Assumption A: lossless transport.}
+The actual collective implements (1) without loss, duplication, local token
+reordering, or incorrect chunk boundaries.
+
+\paragraph{Assumption B: local-kernel semantic agreement.}
+For each head block $r_h$, the CP fused kernel and the dense baseline implement
+the same complete-sequence function
+\[
+\Kernel_m(Q_{r_h},K_{r_h},V_{r_h}),
+\]
+where $m$ contains causal boundaries, cumulative sequence lengths, reset
+markers, and scaling information. The operator may be full attention or an
+entire GDN head-block pipeline.
+
+\paragraph{Assumption C: identical metadata.}
+The CP path reconstructs exactly the same global segmentation as the baseline.
+It neither joins distinct packed samples into one causal segment nor omits a
+GDN reset.
+
+\section{General Equivalence Theorem}
+
+Define the dense head-separable result by
+\[
+Y_{\mathrm{dense}}[r_s,i,r_h]
+=
+\Kernel_m
+\left(
+Q[\cdot,\cdot,r_h],
+K[\cdot,\cdot,r_h],
+V[\cdot,\cdot,r_h]
+\right)[r_s,i]. \tag{3}
+\]
+Define the CP result by
+\[
+Y_{\mathrm{cp}}
+=
+\Tmap^{-1}
+\left(
+r_h\mapsto
+\Kernel_m
+\left(
+(\Tmap Q)[r_h,\cdot,\cdot],
+(\Tmap K)[r_h,\cdot,\cdot],
+(\Tmap V)[r_h,\cdot,\cdot]
+\right)
+\right). \tag{4}
+\]
+
+\subsection{Round Trip}
+
+\textbf{Theorem 1.}
+For every tensor $X$,
+\[
+\Tmap^{-1}(\Tmap X)=X,\qquad
+\Tmap(\Tmap^{-1}X)=X. \tag{5}
+\]
+
+\textbf{Proof.}
+Fix $(r_s,i,r_h)$. By definition,
+\[
+(\Tmap^{-1}\Tmap X)[r_s,i,r_h]
+=(\Tmap X)[r_h,r_s,i]
+=X[r_s,i,r_h].
+\]
+The opposite direction is identical. Lean applies function extensionality to
+the three indices; the remaining proof reduces to \texttt{rfl}. \qed
+
+\subsection{CP Forward Equals Dense Forward}
+
+\textbf{Theorem 2.}
+For arbitrary Q, K, V, metadata, and any head-block-separable kernel,
+\[
+\boxed{Y_{\mathrm{cp}}=Y_{\mathrm{dense}}}. \tag{6}
+\]
+
+\textbf{Proof.}
+Fix $(r_s,i,r_h)$. Expanding (4) and the inverse transform gives
+\[
+Y_{\mathrm{cp}}[r_s,i,r_h]
+=
+\Kernel_m
+\left(
+(\Tmap Q)[r_h,\cdot,\cdot],
+(\Tmap K)[r_h,\cdot,\cdot],
+(\Tmap V)[r_h,\cdot,\cdot]
+\right)[r_s,i].
+\]
+Equation (1) yields
+\[
+(\Tmap Q)[r_h,r'_s,i']=Q[r'_s,i',r_h],
+\]
+and similarly for K and V. The right-hand side is exactly (3). Since the
+output index was arbitrary, function extensionality gives equality of the
+whole tensors. In Lean, the indexed equality reduces to \texttt{rfl}. \qed
+
+\subsection{Packed Communication}
+
+Let
+\[
+P(Q,K,V)[r_s,i,r_h]
+=
+(Q[r_s,i,r_h],K[r_s,i,r_h],V[r_s,i,r_h]).
+\]
+Then
+\[
+\Tmap(P(Q,K,V))
+=
+P(\Tmap Q,\Tmap K,\Tmap V). \tag{7}
+\]
+Therefore packing projections before the collective is semantically
+transparent whenever the physical chunk and split boundaries match the
+payload partition.
+
+\subsection{Downstream Observations}
+
+For any pure downstream observation $\Phi$,
+\[
+\Phi(Y_{\mathrm{cp}})=\Phi(Y_{\mathrm{dense}}). \tag{8}
+\]
+Lean obtains this by congruence from (6). If the two sides are interpreted as
+one differentiable real function, their mathematical derivatives agree where
+they exist. A concrete autograd engine, BF16 rounding, and distributed
+gradient collectives are outside the formal model.
+
+\section{Full-Attention Instance}
+
+At one head-block rank, the Q payload may contain six consecutive Q heads,
+while the K and V payloads each contain one KV head. The local operator
+contains the GQA mapping. Alignment follows from
+\[
+24=4\times6,\qquad
+4=4\times1,\qquad
+6=1\times6.
+\]
+Lean checks these closed integer equalities. Causal masking, TND layout,
+variable-length boundaries, and scale remain in metadata or in the local
+kernel. The transport theorem says CP itself does not alter these
+mathematical inputs when the complete token order is preserved.
+
+\section{GDN Instance}
+
+Define one compound GDN payload
+\[
+Z=(Q,K,V,a,\beta,\theta_{\mathrm{conv}},A_{\log},b_{\Delta t}),
+\]
+and let $\mathcal G_m(Z)$ perform segment-aware causal convolution, decay-gate
+construction, reset-aware Gated Delta recurrence, and output generation. The
+unary instance of the theorem is
+\[
+\Tmap^{-1}\bigl(\mathcal G_m(\Tmap Z)\bigr)
+=
+\mathcal G_m(Z). \tag{9}
+\]
+The source-level bridge must still show that \texttt{shard\_local\_heads}
+aligns convolution weights, \texttt{A\_log}, and \texttt{dt\_bias} with the
+exchanged activation block, and that cumulative sequence lengths induce the
+same resets as the baseline.
+
+\section{Formal Verification}
+
+\texttt{Proof.lean} imports only Lean Core \texttt{Init}. It verifies:
+\begin{itemize}
+  \item $32768=4\times8192$;
+  \item the 24/4 full-attention split into 6/1 heads per rank;
+  \item the 16/48 GDN split into 4/12 heads per rank;
+  \item both rank-axis transforms are mutual inverses;
+  \item packed and componentwise transport are equal;
+  \item CP/dense equality for arbitrary metadata and arbitrary local kernels;
+  \item preservation of arbitrary pure downstream observations.
+\end{itemize}
+
+The intended audit commands are:
+\begin{verbatim}
+lake build
+lake env leanchecker --fresh Problems.TorchTitanNPUQwen36CP.Proof
+lake env lean Problems/TorchTitanNPUQwen36CP/Proof.lean
+\end{verbatim}
+The file uses no \texttt{sorry}, \texttt{admit}, custom axiom, or
+\texttt{native\_decide}; \texttt{\#print axioms} exposes dependencies.
+
+\section{Interpretation Boundary}
+
+The theorem does not prove that DTensor/HCCL can never reorder data in a
+specific software stack. It does not prove every dynamic
+\texttt{torch.chunk}/concatenate/split boundary, every packed or padded
+metadata case, bitwise BF16 equivalence of CANN attention, or bitwise
+equivalence of the Triton-Ascend GDN forward, backward, and checkpoint replay.
+It also does not cover independent defects in FSDP, optimizer updates, or
+checkpoint serialization.
+
+Engineering validation should therefore include deterministic CP1/CP4
+comparisons from the same checkpoint and global batch, intermediate Q/K/V and
+GDN-state comparisons, cross-rank packed-sequence boundary cases, randomized
+transport inversion tests, 32K/64K loss and gradient comparisons, and
+save/reload continuation tests.
+
+\section{Conclusion}
+
+The reviewed Qwen3.6 CP skeleton is
+\[
+\text{sequence shard}
+\xrightarrow{\Tmap}
+\text{head shard with full sequence}
+\xrightarrow{\Kernel_m}
+\text{head-sharded output}
+\xrightarrow{\Tmap^{-1}}
+\text{sequence-sharded output}.
+\]
+Lean verifies
+\[
+\boxed{\Tmap^{-1}\circ\Kernel_m\circ\Tmap=\Kernel_m}
+\]
+pointwise for every head-block-separable $\Kernel_m$ with identical metadata.
+The defensible conclusion is that the CP communication skeleton is
+mathematically correct under the stated transport, kernel, and metadata
+premises. Remaining risk lies in the code-to-model correspondence, especially
+DTensor chunk boundaries, variable-length metadata, fused-kernel semantics,
+and the backward/training path.
+
+\end{document}

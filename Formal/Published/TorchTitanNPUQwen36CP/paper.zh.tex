@@ -1,0 +1,328 @@
+% MODEL-ID: SP-P0002-TTNPU-Q36-CP-v1
+% UPSTREAM-COMMIT: 7864d5dc17930667d663bbadd1ce2bc722de2753
+% CP-DEGREE: 4
+% GLOBAL-SEQ-LEN: 32768
+% LOCAL-SEQ-LEN: 8192
+% FULL-Q-HEADS: 24
+% FULL-KV-HEADS: 4
+% GDN-QK-HEADS: 16
+% GDN-V-HEADS: 48
+
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb,mathtools,booktabs,geometry,hyperref,microtype}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newcommand{\CP}{\operatorname{CP}}
+\newcommand{\Tmap}{\mathcal T}
+\newcommand{\Kernel}{\mathcal K}
+\title{TorchTitan-NPU \texttt{override-refactor} 中 Qwen3.6 Context Parallel 的条件正确性}
+\author{Model ID: SP-P0002-TTNPU-Q36-CP-v1}
+\date{2026-08-24}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文形式化分析 \texttt{cann/torchtitan-npu} 的
+\texttt{override-refactor} 分支中 Qwen3.5/3.6 长文本训练所采用的
+Context Parallel（CP）实现，审阅提交固定为
+\texttt{7864d5dc17930667d663bbadd1ce2bc722de2753}。
+配置把长度 $32768$ 的序列按 $\CP=4$ 切成每 rank $8192$ token，
+并分别处理变长 TND full attention 与包含因果卷积和递归状态的
+Gated DeltaNet（GDN）。
+
+证明把实现拆成通信、局部算子和代码到模型映射三层。Lean 4
+验证通信层：序列维分片到头块维分片可建模为两个 rank 轴的交换，
+其逆变换与原变换互逆；多个 projection 先打包后通信，与分别通信再
+打包逐元素等价。由此证明，只要真实 collective 实现该无损交换，
+局部融合 kernel 与非 CP 基线实现同一个头块可分函数，而且两条路径
+使用相同的全局序列 metadata，则 CP 输出与非 CP 输出逐元素相等。
+该结果同时覆盖 full attention 与 GDN，但不替代对 DTensor、HCCL、
+CANN kernel、metadata 构造和分布式反向的外部验证。
+\end{abstract}
+
+\section{外部事实与审阅范围}
+
+审阅对象固定为以下源码路径：
+\begin{verbatim}
+torchtitan_npu/models/qwen3_5/config_registry.py
+torchtitan_npu/override/qwen3_5/parallelize.py
+torchtitan_npu/override/qwen3_5/varlen_attention.py
+torchtitan_npu/override/qwen3_5/gated_delta.py
+\end{verbatim}
+Python package 名仍是 \texttt{qwen3\_5}，但 override 描述明确写明
+``Qwen3.5/3.6 Context Parallel''。本文使用用户侧名称 Qwen3.6，
+同时保留源码路径以避免命名混淆。
+
+长文本配置给出
+\[
+L=32768,\qquad P=4,\qquad L_{\mathrm{local}}=8192.
+\]
+其中 $P$ 为 CP degree。配置同时加载
+\texttt{varlen\_attention.asc\_cp} 与
+\texttt{gated\_delta.context\_parallel}。
+
+\subsection{通信骨架}
+
+\texttt{sequence\_to\_head\_shard} 把本地张量声明为沿序列维
+\texttt{Shard(1)}，再通过 DTensor \texttt{redistribute} 改为沿
+head 维分片；\texttt{head\_to\_sequence\_shard} 做逆变换。
+\texttt{exchange\_sequence\_heads} 会先把多个 projection 的 head
+chunk 打包，目的是减少 collective 次数。数学正确性要求打包不改变
+任何元素的归属和顺序。
+
+\subsection{Full attention}
+
+full-attention 路径依次执行：必要的 GQA K/V 处理、Q/K/V 的序列到
+头块交换、TND 融合注意力、头块到序列的逆交换。头数为
+\[
+H_Q=24,\qquad H_{KV}=4.
+\]
+在 $P=4$ 下，每个 rank 对应
+\[
+H_Q^{\mathrm{local}}=6,\qquad H_{KV}^{\mathrm{local}}=1.
+\]
+因此一个本地 KV head 与六个本地 Q heads 的 GQA 分组恰好和 CP rank
+边界对齐。
+
+\subsection{Gated DeltaNet}
+
+GDN 路径对 Q、K、V、decay、beta 五类 projection 做同样的交换，
+随后在完整序列上执行分段因果卷积和递归，再把输出交换回序列分片。
+其头数为
+\[
+H_{QK}=16,\qquad H_V=48,
+\]
+所以每 rank 分别持有 4 个 Q/K heads 与 12 个 V heads。形式模型把
+每个 rank 对应的整个 head chunk 作为抽象 payload，不强行假设各类
+projection 具有相同头数。
+
+\section{数学模型与假设}
+
+全局序列位置写成
+\[
+(r_s,i),\qquad r_s\in\{0,\ldots,P-1\},\quad
+i\in\{0,\ldots,L_{\mathrm{local}}-1\},
+\]
+全局头块写成
+\[
+r_h\in\{0,\ldots,P-1\}.
+\]
+序列分片布局中的元素记为 $X[r_s,i,r_h]$。序列到头块的变换定义为
+\[
+(\Tmap X)[r_h,r_s,i]=X[r_s,i,r_h], \tag{1}
+\]
+逆变换定义为
+\[
+(\Tmap^{-1}Y)[r_s,i,r_h]=Y[r_h,r_s,i]. \tag{2}
+\]
+
+\paragraph{假设 A：无损通信。}
+真实 collective 与式（1）的元素映射一致，不丢失、不复制、不改变
+局部 token 顺序，也不使用错误的 chunk 边界。
+
+\paragraph{假设 B：局部算子语义一致。}
+对每个头块 $r_h$，CP kernel 与非 CP 基线在相同输入上实现同一个
+完整序列算子
+\[
+\Kernel_m(Q_{r_h},K_{r_h},V_{r_h}),
+\]
+其中 $m$ 包含因果 mask、累计序列长度、reset 边界和 scale。该算子
+可以是 full attention，也可以是把因果卷积、gate、beta 和递归状态
+更新整体封装起来的 GDN。
+
+\paragraph{假设 C：metadata 一致。}
+CP 重建的全局样本分段与非 CP 基线完全一致，不能把两个样本连成一
+条因果序列，也不能遗漏 GDN reset。
+
+\section{一般等价定理}
+
+非 CP 的头块可分结果定义为
+\[
+Y_{\mathrm{dense}}[r_s,i,r_h]
+=
+\Kernel_m
+\left(
+Q[\cdot,\cdot,r_h],
+K[\cdot,\cdot,r_h],
+V[\cdot,\cdot,r_h]
+\right)[r_s,i]. \tag{3}
+\]
+CP 结果定义为
+\[
+Y_{\mathrm{cp}}
+=
+\Tmap^{-1}
+\left(
+r_h\mapsto
+\Kernel_m
+\left(
+(\Tmap Q)[r_h,\cdot,\cdot],
+(\Tmap K)[r_h,\cdot,\cdot],
+(\Tmap V)[r_h,\cdot,\cdot]
+\right)
+\right). \tag{4}
+\]
+
+\subsection{通信往返}
+
+\textbf{定理 1.}
+对任意张量 $X$，
+\[
+\Tmap^{-1}(\Tmap X)=X,\qquad
+\Tmap(\Tmap^{-1}X)=X. \tag{5}
+\]
+
+\textbf{证明.}
+固定任意 $(r_s,i,r_h)$，由定义
+\[
+(\Tmap^{-1}\Tmap X)[r_s,i,r_h]
+=(\Tmap X)[r_h,r_s,i]
+=X[r_s,i,r_h].
+\]
+另一方向同理。Lean 对三个索引应用函数外延，展开定义后证明项归约
+为 \texttt{rfl}。\qed
+
+\subsection{CP 与 dense 前向等价}
+
+\textbf{定理 2.}
+在上述模型中，对任意 Q、K、V、metadata 以及任意头块可分 kernel，
+\[
+\boxed{Y_{\mathrm{cp}}=Y_{\mathrm{dense}}}. \tag{6}
+\]
+
+\textbf{证明.}
+固定 $(r_s,i,r_h)$。由式（4）和逆变换定义，
+\[
+Y_{\mathrm{cp}}[r_s,i,r_h]
+=
+\Kernel_m
+\left(
+(\Tmap Q)[r_h,\cdot,\cdot],
+(\Tmap K)[r_h,\cdot,\cdot],
+(\Tmap V)[r_h,\cdot,\cdot]
+\right)[r_s,i].
+\]
+再由式（1），
+\[
+(\Tmap Q)[r_h,r'_s,i']=Q[r'_s,i',r_h],
+\]
+K、V 同理，因此右侧正是式（3）。索引任意，故整体函数相等。
+Lean 中该证明在展开定义后逐点归约为 \texttt{rfl}。\qed
+
+\subsection{打包通信}
+
+令
+\[
+P(Q,K,V)[r_s,i,r_h]
+=
+(Q[r_s,i,r_h],K[r_s,i,r_h],V[r_s,i,r_h]).
+\]
+则
+\[
+\Tmap(P(Q,K,V))
+=
+P(\Tmap Q,\Tmap K,\Tmap V). \tag{7}
+\]
+所以，源码中先拼接多个 projection 再 collective 的做法，只要
+chunk 与 split 边界和 payload 一致，就不会改变数学语义。
+
+\subsection{下游目标保持}
+
+对任意纯函数观测量 $\Phi$，
+\[
+\Phi(Y_{\mathrm{cp}})=\Phi(Y_{\mathrm{dense}}). \tag{8}
+\]
+Lean 对式（6）使用函数同余得到该推论。若两边被解释为同一可微实
+函数，则导数存在处的数学梯度相同；具体 autograd engine、BF16
+舍入与分布式反向不在本形式化中。
+
+\section{Full attention 的实例化}
+
+每个头块的 Q payload 可以包含六个连续 Q heads，而 K/V payload
+各包含一个 KV head。局部 kernel 内部实现 GQA。分组关系
+\[
+24=4\times6,\qquad 4=4\times1,\qquad 6=1\times6
+\]
+由 Lean 的封闭整数定理验证。因果 mask、TND layout、scale 和变长
+边界都作为 metadata 或局部 kernel 的一部分保留。通信定理说明，
+只要每个头块看到的全局 token 顺序不变，CP 本身不会改变 attention
+的数学输入。
+
+\section{GDN 的实例化}
+
+把一个 GDN 头块 payload 写成
+\[
+Z=(Q,K,V,a,\beta,\theta_{\mathrm{conv}},A_{\log},b_{\Delta t}),
+\]
+令 $\mathcal G_m(Z)$ 表示分段因果卷积、decay gate、reset-aware
+Gated Delta recurrence 以及输出生成的整体函数。则 GDN 的 CP 路径
+是同一定理的一元版本：
+\[
+\Tmap^{-1}\bigl(\mathcal G_m(\Tmap Z)\bigr)
+=
+\mathcal G_m(Z). \tag{9}
+\]
+真实实现仍必须保证 \texttt{shard\_local\_heads} 使卷积权重、
+\texttt{A\_log}、\texttt{dt\_bias} 与交换后的激活头块对齐，并且
+\texttt{cu\_seqlens} 给出与基线相同的 reset。
+
+\section{形式验证与审计}
+
+\texttt{Proof.lean} 仅导入 Lean Core 的 \texttt{Init}，验证：
+
+\begin{itemize}
+  \item $32768=4\times8192$；
+  \item full attention 的 $24/4$ heads 在 CP=4 下分成 $6/1$；
+  \item GDN 的 $16/48$ heads 在 CP=4 下分成 $4/12$；
+  \item 两个 rank 轴变换互逆；
+  \item 打包交换与逐 tensor 交换等价；
+  \item 任意 metadata、任意局部 kernel 下的 CP/dense 等价；
+  \item 任意下游纯函数观测量保持。
+\end{itemize}
+
+验证命令为：
+\begin{verbatim}
+lake build
+lake env leanchecker --fresh Problems.TorchTitanNPUQwen36CP.Proof
+lake env lean Problems/TorchTitanNPUQwen36CP/Proof.lean
+\end{verbatim}
+文件不使用 \texttt{sorry}、\texttt{admit}、自定义公理或
+\texttt{native\_decide}，并通过 \texttt{\#print axioms} 暴露依赖。
+
+\section{解释边界}
+
+本文没有证明 DTensor/HCCL 在具体版本组合上永不错序，没有证明
+\texttt{torch.chunk}、拼接和 split 的所有动态边界，没有证明
+\texttt{build\_sequence\_metadata} 在所有 packing/padding 情况下均
+正确，也没有证明 CANN attention 与 Triton-Ascend GDN 的 BF16
+前向、反向、checkpoint 重算逐 bit 等价。FSDP、optimizer 和权重
+保存路径也可能存在与 CP 无关的独立问题。
+
+工程验证应继续加入：同 checkpoint 与同 global batch 下的 CP1/CP4
+确定性对照；Q/K/V、GDN state 和梯度的分层比较；跨 rank packed
+sequence 边界测试；通信可逆随机测试；32K/64K 的 loss、grad 与
+weight-update 对照；保存恢复后继续训练的权重差异检查。
+
+\section{结论}
+
+在本文模型中，Qwen3.6 CP 的核心结构为
+\[
+\text{sequence shard}
+\xrightarrow{\Tmap}
+\text{head shard with full sequence}
+\xrightarrow{\Kernel_m}
+\text{head-sharded output}
+\xrightarrow{\Tmap^{-1}}
+\text{sequence-sharded output}.
+\]
+Lean 已验证
+\[
+\boxed{\Tmap^{-1}\circ\Kernel_m\circ\Tmap=\Kernel_m}
+\]
+对任意头块可分 $\Kernel_m$ 逐元素成立。因而可以准确地说：
+\texttt{override-refactor} 的 Qwen3.6 CP 通信算法骨架在无损交换、
+局部 kernel 语义一致和 metadata 一致三个前提下是数学正确的。
+剩余风险集中在代码到模型的映射，而不是这条 rank 轴交换定理本身。
+
+\end{document}

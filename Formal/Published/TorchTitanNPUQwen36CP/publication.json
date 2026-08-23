@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "problem_id": "p0002-torchtitan-npu-qwen36-cp",
+  "model_id": "SP-P0002-TTNPU-Q36-CP-v1",
+  "public_repo": "stoppingtime/stochastic-belief",
+  "public_root": "Formal/Published/TorchTitanNPUQwen36CP",
+  "lean_entry": "Proof.lean",
+  "audit_declarations": [
+    "TorchTitanNPUQwen36CP.head_to_sequence_after_sequence_to_head",
+    "TorchTitanNPUQwen36CP.sequence_to_head_after_head_to_sequence",
+    "TorchTitanNPUQwen36CP.packed_exchange_is_componentwise",
+    "TorchTitanNPUQwen36CP.context_parallel_three_eq_dense",
+    "TorchTitanNPUQwen36CP.context_parallel_unary_eq_dense",
+    "TorchTitanNPUQwen36CP.downstream_observation_preserved",
+    "TorchTitanNPUQwen36CP.full_attention_transport_correct",
+    "TorchTitanNPUQwen36CP.gated_delta_transport_correct"
+  ],
+  "files": [
+    "metadata.json",
+    "publication.json",
+    "evidence.md",
+    "paper.zh.tex",
+    "paper.en.tex",
+    "paper.zh.md",
+    "paper.en.md",
+    "Proof.lean"
+  ]
+}

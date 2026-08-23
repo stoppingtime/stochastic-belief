@@ -34,3 +34,32 @@ jobs:
             printf '%-32s ' "$name"
             git show "$ref:payload/p0001-qwen38-m1-ultra-q4/$name" | sha256sum | awk '{print $1}'
           done
+
+      - name: Diagnose text-normalization drift for Chinese Markdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref='origin/incoming/stochastic-problems/p0001-qwen38-m1-ultra-q4'
+          git show "$ref:payload/p0001-qwen38-m1-ultra-q4/paper.zh.md" > /tmp/zh.md
+          python3 - <<'PY'
+          import hashlib, unicodedata
+          from pathlib import Path
+
+          data = Path('/tmp/zh.md').read_bytes()
+          text = data.decode('utf-8')
+          variants = {
+              'raw': data,
+              'strip-final-newlines': data.rstrip(b'\n'),
+              'exactly-one-final-newline': data.rstrip(b'\n') + b'\n',
+              'crlf-to-lf': data.replace(b'\r\n', b'\n'),
+              'nfc': unicodedata.normalize('NFC', text).encode('utf-8'),
+              'nfkc': unicodedata.normalize('NFKC', text).encode('utf-8'),
+              'nfc-one-final-newline': (unicodedata.normalize('NFC', text).rstrip('\n') + '\n').encode('utf-8'),
+              'nfkc-one-final-newline': (unicodedata.normalize('NFKC', text).rstrip('\n') + '\n').encode('utf-8'),
+          }
+          for name, blob in variants.items():
+              print(f'{name:28s} bytes={len(blob):6d} sha256={hashlib.sha256(blob).hexdigest()}')
+          print('final-bytes-hex:', data[-32:].hex())
+          print('unicode-normalized-NFC:', text == unicodedata.normalize('NFC', text))
+          print('unicode-normalized-NFKC:', text == unicodedata.normalize('NFKC', text))
+          PY

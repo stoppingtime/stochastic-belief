@@ -1,6 +1,11 @@
 name: Import stochastic-problems publications
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/import-stochastic-problems.yml'
+      - 'scripts/validate_stochastic_export.py'
   schedule:
     - cron: '41 * * * *'
   workflow_dispatch:

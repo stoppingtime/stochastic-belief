@@ -1,0 +1,170 @@
+name: Validate stochastic-problems incoming bundle
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: hashes + quartet + Lean fresh replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the public repository's pinned Lean toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain "$(cat lean-toolchain)"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/lean" --version
+
+      - name: Validate every publicly authorized incoming branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+
+          mapfile -t problem_ids < <(python3 - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('validator', 'scripts/validate_stochastic_export.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          for problem_id in sorted(mod.PUBLICATIONS):
+              print(problem_id)
+          PY
+          )
+
+          checked=0
+          for problem_id in "${problem_ids[@]}"; do
+            remote_ref="refs/heads/incoming/stochastic-problems/${problem_id}"
+            local_ref="refs/remotes/origin/incoming-stochastic-${problem_id}"
+
+            if ! git ls-remote --exit-code https://github.com/${GITHUB_REPOSITORY}.git "$remote_ref" >/dev/null 2>&1; then
+              echo "Missing authorized incoming branch: ${problem_id}" >&2
+              exit 1
+            fi
+
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" \
+              fetch --force https://github.com/${GITHUB_REPOSITORY}.git \
+              "${remote_ref}:${local_ref}"
+
+            incoming="/tmp/incoming-${problem_id}"
+            validated="/tmp/validated-${problem_id}"
+            receipt="/tmp/receipt-${problem_id}.json"
+            leancheck="/tmp/leancheck-${problem_id}"
+            rm -rf "$incoming" "$validated" "$receipt" "$leancheck"
+            mkdir -p "$incoming/payload/${problem_id}"
+
+            git show "${local_ref}:EXPORT-MANIFEST.json" > "$incoming/EXPORT-MANIFEST.json"
+            POLICY_OUT="/tmp/policy-${problem_id}.txt" PROBLEM_ID="$problem_id" \
+              python3 - <<'PY'
+          import importlib.util, json, os
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('validator', 'scripts/validate_stochastic_export.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          pid = os.environ['PROBLEM_ID']
+          policy = mod.PUBLICATIONS[pid]
+          manifest = json.loads(Path(f'/tmp/incoming-{pid}/EXPORT-MANIFEST.json').read_text())
+          if manifest.get('problem_id') != pid:
+              raise SystemExit('incoming manifest problem_id mismatch')
+          expected = {f'payload/{pid}/{name}' for name in policy['required_files']}
+          entries = manifest.get('files')
+          if not isinstance(entries, list):
+              raise SystemExit('incoming manifest files is not a list')
+          got = []
+          for item in entries:
+              if not isinstance(item, dict) or not isinstance(item.get('path'), str):
+                  raise SystemExit('malformed incoming file entry')
+              p = item['path']
+              if p not in expected:
+                  raise SystemExit(f'unapproved incoming path: {p!r}')
+              got.append(p)
+          if set(got) != expected or len(got) != len(expected):
+              raise SystemExit('incoming file set differs from public policy')
+          Path(os.environ['POLICY_OUT']).write_text('\n'.join(sorted(expected)) + '\n')
+          PY
+
+            while IFS= read -r path; do
+              mkdir -p "$incoming/$(dirname "$path")"
+              git show "${local_ref}:${path}" > "$incoming/${path}"
+            done < "/tmp/policy-${problem_id}.txt"
+
+            python3 scripts/validate_stochastic_export.py \
+              "$incoming" "$validated" --receipt "$receipt"
+
+            mkdir -p "$leancheck/Generated"
+            cp "$validated/Proof.lean" "$leancheck/Generated/Proof.lean"
+            cp lean-toolchain "$leancheck/lean-toolchain"
+            cat > "$leancheck/lakefile.lean" <<'EOF'
+          import Lake
+          open Lake DSL
+          package incoming_stochastic_proof
+          @[default_target]
+          lean_lib Generated
+          EOF
+            printf '%s\n' 'import Generated.Proof' > "$leancheck/Generated.lean"
+
+            (
+              cd "$leancheck"
+              lake build
+              lake env leanchecker --fresh Generated.Proof
+              lake env lean Generated/Proof.lean 2>&1 | tee "/tmp/incoming-axioms-${problem_id}.txt"
+            )
+
+            RECEIPT="$receipt" AXIOMS="/tmp/incoming-axioms-${problem_id}.txt" python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          receipt = json.loads(Path(os.environ['RECEIPT']).read_text())
+          text = Path(os.environ['AXIOMS']).read_text()
+          allowed = {'propext', 'Classical.choice', 'Quot.sound'}
+          lines = [x for x in text.splitlines() if 'depends on axioms:' in x]
+          if not lines:
+              raise SystemExit('incoming proof emitted no #print axioms lines')
+          seen = set()
+          for line in lines:
+              mname = re.match(r"'([^']+)' depends on axioms:", line)
+              maxiom = re.search(r'depends on axioms:\s*\[(.*)\]\s*$', line)
+              if not mname or not maxiom:
+                  raise SystemExit(f'cannot parse axiom output: {line!r}')
+              seen.add(mname.group(1))
+              used = {x.strip() for x in maxiom.group(1).split(',') if x.strip()}
+              bad = used - allowed
+              if bad:
+                  raise SystemExit(f'non-standard axioms in incoming proof: {sorted(bad)}')
+          missing = set(receipt['audit_declarations']) - seen
+          if missing:
+              raise SystemExit(f'missing required axiom-audited declarations: {sorted(missing)}')
+          if 'sorryAx' in text or 'Lean.trustCompiler' in text:
+              raise SystemExit('forbidden trust escape in incoming proof')
+          print(json.dumps({
+              'problem_id': receipt['problem_id'],
+              'canonical_commit': receipt['canonical_commit'],
+              'manifest_sha256': receipt['manifest_sha256'],
+              'lean_entry_sha256': receipt['lean_entry_sha256'],
+              'audit_declarations_checked': len(receipt['audit_declarations']),
+          }, sort_keys=True))
+          PY
+            checked=$((checked + 1))
+          done
+
+          if [ "$checked" -eq 0 ]; then
+            echo 'No authorized publication was validated.' >&2
+            exit 1
+          fi
+          echo "Read-only incoming validation passed for ${checked} publication(s)."

@@ -1,0 +1,62 @@
+name: Sync Lean resource Markdown
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/sync-lean-resources.yml'
+  schedule:
+    - cron: '23 5 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-lean-resources
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync Markdown snapshots and licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p resources/upstream/best-of-lean4
+          mkdir -p resources/upstream/lean-community
+
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://raw.githubusercontent.com/34j/best-of-lean4/main/README.md \
+            -o resources/upstream/best-of-lean4/README.md
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://raw.githubusercontent.com/34j/best-of-lean4/main/LICENSE \
+            -o resources/upstream/best-of-lean4/LICENSE
+
+          base=https://raw.githubusercontent.com/leanprover-community/leanprover-community.github.io/lean4
+          curl --proto '=https' --tlsv1.2 -fsSL "$base/templates/learn.md" \
+            -o resources/upstream/lean-community/learn.md
+          curl --proto '=https' --tlsv1.2 -fsSL "$base/templates/teaching/resources.md" \
+            -o resources/upstream/lean-community/teaching-resources.md
+          curl --proto '=https' --tlsv1.2 -fsSL "$base/templates/did_you_prove_it.md" \
+            -o resources/upstream/lean-community/did-you-prove-it.md
+          curl --proto '=https' --tlsv1.2 -fsSL "$base/LICENSE" \
+            -o resources/upstream/lean-community/LICENSE
+
+      - name: Commit resource updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add resources/upstream
+          if git diff --cached --quiet; then
+            echo 'Lean resource snapshots already current.'
+          else
+            git commit -m 'chore(resources): sync Lean Markdown snapshots'
+            git push
+          fi

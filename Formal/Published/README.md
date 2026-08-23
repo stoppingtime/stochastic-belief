@@ -18,7 +18,7 @@ The validation job has only `contents: read`. It materializes only file names al
 
 Only after that job succeeds does a second job receive `contents: write`. The second job downloads the already-validated artifact, copies data files into `Formal/Published/`, and commits them. It does not execute the incoming Lean source.
 
-A separate pull-request workflow performs the same incoming validation with read-only permissions. It exists to make the trust contract observable and reviewable without granting publication authority.
+A separate pull-request workflow performs the same incoming validation with read-only permissions. It exists to make the trust contract observable and reviewable without granting publication authority. A second read-only audit workflow prints the manifest and actual SHA-256 values of the incoming files, which makes byte-level mirror drift diagnosable without executing incoming code.
 
 ## Validation performed before publication
 

@@ -11,21 +11,25 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: import-stochastic-problems
   cancel-in-progress: true
 
 jobs:
-  import:
+  validate:
+    name: validate incoming bundles without write authority
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install the public repository's pinned Lean toolchain
         shell: bash
@@ -38,11 +42,14 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           "$HOME/.elan/bin/lean" --version
 
-      - name: Fetch, validate, kernel-check, and stage authorized publications
+      - name: Fetch, materialize, validate, and kernel-check authorized publications
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.elan/bin:$PATH"
+          stage=/tmp/publication-stage
+          rm -rf "$stage"
+          mkdir -p "$stage"
 
           mapfile -t problem_ids < <(python3 - <<'PY'
           import importlib.util
@@ -59,19 +66,58 @@ jobs:
             remote_ref="refs/heads/incoming/stochastic-problems/${problem_id}"
             local_ref="refs/remotes/origin/incoming-stochastic-${problem_id}"
 
-            if ! git ls-remote --exit-code origin "$remote_ref" >/dev/null 2>&1; then
+            if ! git ls-remote --exit-code https://github.com/${GITHUB_REPOSITORY}.git "$remote_ref" >/dev/null 2>&1; then
               echo "No incoming publication branch for ${problem_id}; leaving current public copy unchanged."
               continue
             fi
 
-            git fetch --force origin "${remote_ref}:${local_ref}"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" \
+              fetch --force https://github.com/${GITHUB_REPOSITORY}.git \
+              "${remote_ref}:${local_ref}"
+
             incoming="/tmp/incoming-${problem_id}"
             validated="/tmp/validated-${problem_id}"
             receipt="/tmp/receipt-${problem_id}.json"
             leancheck="/tmp/leancheck-${problem_id}"
             rm -rf "$incoming" "$validated" "$receipt" "$leancheck"
-            mkdir -p "$incoming"
-            git archive "$local_ref" | tar -x -C "$incoming"
+            mkdir -p "$incoming/payload/${problem_id}"
+
+            # Read the manifest first, then materialize only file names authorized
+            # by the trusted validator on master.  No untrusted tar archive is extracted.
+            git show "${local_ref}:EXPORT-MANIFEST.json" > "$incoming/EXPORT-MANIFEST.json"
+            POLICY_OUT="/tmp/policy-${problem_id}.txt" PROBLEM_ID="$problem_id" \
+              python3 - <<'PY'
+          import importlib.util, json, os
+          from pathlib import Path, PurePosixPath
+          spec = importlib.util.spec_from_file_location('validator', 'scripts/validate_stochastic_export.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          pid = os.environ['PROBLEM_ID']
+          policy = mod.PUBLICATIONS[pid]
+          manifest = json.loads(Path(f'/tmp/incoming-{pid}/EXPORT-MANIFEST.json').read_text())
+          if manifest.get('problem_id') != pid:
+              raise SystemExit('incoming manifest problem_id mismatch')
+          expected = {f'payload/{pid}/{name}' for name in policy['required_files']}
+          entries = manifest.get('files')
+          if not isinstance(entries, list):
+              raise SystemExit('incoming manifest files is not a list')
+          got = set()
+          for item in entries:
+              if not isinstance(item, dict) or not isinstance(item.get('path'), str):
+                  raise SystemExit('malformed incoming file entry')
+              p = item['path']
+              if p not in expected:
+                  raise SystemExit(f'unapproved incoming path: {p!r}')
+              got.add(p)
+          if got != expected or len(entries) != len(expected):
+              raise SystemExit('incoming file set differs from public policy')
+          Path(os.environ['POLICY_OUT']).write_text('\n'.join(sorted(expected)) + '\n')
+          PY
+
+            while IFS= read -r path; do
+              mkdir -p "$incoming/$(dirname "$path")"
+              git show "${local_ref}:${path}" > "$incoming/${path}"
+            done < "/tmp/policy-${problem_id}.txt"
 
             python3 scripts/validate_stochastic_export.py \
               "$incoming" "$validated" --receipt "$receipt"
@@ -92,14 +138,14 @@ jobs:
               cd "$leancheck"
               lake build
               lake env leanchecker --fresh Generated.Proof
-              lake env lean Generated/Proof.lean 2>&1 | tee /tmp/incoming-axioms.txt
+              lake env lean Generated/Proof.lean 2>&1 | tee "/tmp/incoming-axioms-${problem_id}.txt"
             )
 
-            RECEIPT="$receipt" python3 - <<'PY'
+            RECEIPT="$receipt" AXIOMS="/tmp/incoming-axioms-${problem_id}.txt" python3 - <<'PY'
           import json, os, re
           from pathlib import Path
           receipt = json.loads(Path(os.environ['RECEIPT']).read_text())
-          text = Path('/tmp/incoming-axioms.txt').read_text()
+          text = Path(os.environ['AXIOMS']).read_text()
           allowed = {'propext', 'Classical.choice', 'Quot.sound'}
           lines = [x for x in text.splitlines() if 'depends on axioms:' in x]
           if not lines:
@@ -124,26 +170,88 @@ jobs:
           PY
 
             public_root="$(RECEIPT="$receipt" python3 - <<'PY'
-          import json, os
+          import json, os, re
           from pathlib import Path
-          d = json.loads(Path(os.environ['RECEIPT']).read_text())
-          root = d['public_root']
-          if not root.startswith('Formal/Published/') or '..' in root.split('/'):
+          root = json.loads(Path(os.environ['RECEIPT']).read_text())['public_root']
+          if not re.fullmatch(r'Formal/Published/[A-Za-z0-9._-]+', root):
               raise SystemExit('unsafe public_root')
           print(root)
           PY
             )"
 
-            rm -rf "$public_root"
-            mkdir -p "$public_root"
-            cp -a "$validated"/. "$public_root"/
-            cp "$receipt" "$public_root/SYNC-RECEIPT.json"
+            mkdir -p "$stage/$public_root"
+            cp -a "$validated"/. "$stage/$public_root"/
+            cp "$receipt" "$stage/$public_root/SYNC-RECEIPT.json"
             imported=$((imported + 1))
           done
 
+          printf '%s\n' "$imported" > "$stage/publish-count.txt"
           echo "Validated and staged ${imported} incoming publication(s)."
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
-      - name: Commit only validated public artifacts
+      - name: Upload validated publication stage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validated-stochastic-publications
+          path: /tmp/publication-stage
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish already-validated artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+
+      - name: Download validated publication stage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validated-stochastic-publications
+          path: /tmp/publication-stage
+
+      - name: Copy validated files without executing them
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(cat /tmp/publication-stage/publish-count.txt)"
+          case "$count" in
+            ''|*[!0-9]*) echo 'invalid publish count' >&2; exit 1 ;;
+          esac
+          if [ "$count" -eq 0 ]; then
+            echo 'No incoming publication was available.'
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import re, shutil
+          from pathlib import Path
+          src_root = Path('/tmp/publication-stage/Formal/Published')
+          dst_root = Path('Formal/Published')
+          if not src_root.is_dir():
+              raise SystemExit('validated stage has no Formal/Published directory')
+          copied = 0
+          for src in sorted(src_root.iterdir()):
+              if not src.is_dir() or not re.fullmatch(r'[A-Za-z0-9._-]+', src.name):
+                  raise SystemExit(f'unsafe staged directory: {src}')
+              dst = dst_root / src.name
+              if dst.exists():
+                  shutil.rmtree(dst)
+              shutil.copytree(src, dst)
+              copied += 1
+          if copied == 0:
+              raise SystemExit('publish count was nonzero but no publication directory was staged')
+          print(f'copied {copied} validated publication(s)')
+          PY
+
+      - name: Commit validated public artifacts
         shell: bash
         run: |
           set -euo pipefail

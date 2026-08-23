@@ -8,6 +8,18 @@
   "toolchain": "leanprover/lean4:v4.33.0",
   "publication_authority": "stoppingtime/stochastic-belief",
   "archive_mirror": "stoppingtime/stochastic-problems",
+  "anchors": {
+    "MODEL-ID": "SP-P0002-TTNPU-Q36-CP-v1",
+    "OVERRIDE-COMMIT": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "TORCHTITAN-COMMIT": "c91448d20480c7b294314e68976823050002ebec",
+    "CP-DEGREE": "4",
+    "GLOBAL-SEQUENCE-LENGTH": "32768",
+    "LOCAL-SEQUENCE-LENGTH": "8192",
+    "FULL-ATTN-Q-HEADS": "24",
+    "FULL-ATTN-KV-HEADS": "4",
+    "GDN-QK-HEADS": "16",
+    "GDN-V-HEADS": "48"
+  },
   "source": {
     "repository": "botcanlearn/torchtitan-npu-upstream",
     "upstream_repository": "cann/torchtitan-npu",

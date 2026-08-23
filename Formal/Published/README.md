@@ -1,16 +1,28 @@
 # Published stochastic-problems artifacts
 
-This directory is populated only by the trusted workflow stored on the public repository's `master` branch.
+This directory is populated only by trusted workflows stored on the public repository's `master` branch.
 
-The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror its Git history here. Instead, it creates a history-free branch under
+The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror its private Git history here. Publication bundles arrive under
 
 ```text
 incoming/stochastic-problems/<problem-id>
 ```
 
-containing only an explicit publication bundle. Incoming branches are treated as untrusted data.
+and are treated as untrusted data.
 
-Before a bundle is copied into this directory, the public workflow independently checks:
+## Two-stage trust boundary
+
+The publication path deliberately separates **validation authority** from **write authority**.
+
+The validation job has only `contents: read`. It materializes only file names already authorized by the public policy, verifies the bundle, and runs the incoming Lean source in a fresh temporary project. It cannot write the public default branch.
+
+Only after that job succeeds does a second job receive `contents: write`. The second job downloads the already-validated artifact, copies data files into `Formal/Published/`, and commits them. It does not execute the incoming Lean source.
+
+A separate pull-request workflow performs the same incoming validation with read-only permissions. It exists to make the trust contract observable and reviewable without granting publication authority.
+
+## Validation performed before publication
+
+Before a bundle is copied into this directory, the public side independently checks:
 
 1. the problem ID against a public hard-coded allowlist;
 2. the exact file set and every SHA-256 in `EXPORT-MANIFEST.json`;

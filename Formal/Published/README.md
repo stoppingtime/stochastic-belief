@@ -1,28 +1,48 @@
-# Published stochastic-problems artifacts
+# Published mathematical problems
 
-This directory is populated only by the trusted workflow stored on the public repository's `master` branch.
+This directory is the public, machine-verifiable publication surface for mathematical models and proofs. It contains only artifacts intended to be public: synchronized Chinese/English LaTeX and Markdown manuscripts, evidence ledgers, metadata, and Lean sources.
 
-The private canonical repository is `stoppingtime/stochastic-problems`. It does **not** mirror its Git history here. Instead, it creates a history-free branch under
+## Keyless synchronization model
+
+No cross-repository credential is used.
 
 ```text
-incoming/stochastic-problems/<problem-id>
+stochastic-belief (public publication authority)
+        |
+        | anonymous HTTPS read of a fixed public commit
+        v
+stochastic-problems (private archival mirror + private notes)
 ```
 
-containing only an explicit publication bundle. Incoming branches are treated as untrusted data.
+The private repository periodically clones this public repository without authentication and copies each allowlisted publication into its archive using its own repository-scoped `GITHUB_TOKEN`. Private `notes/` directories remain private and are never read or written by the public repository. This direction is possible without a PAT, deploy key, GitHub App private key, or user-maintained secret because public Git data is anonymously readable and the only write occurs inside the private workflow's own repository.
 
-Before a bundle is copied into this directory, the public workflow independently checks:
+The public repository is therefore authoritative for publishable theorem statements and manuscripts. The private repository is authoritative for non-public research notes and keeps a content-addressed archival copy of each public problem.
 
-1. the problem ID against a public hard-coded allowlist;
-2. the exact file set and every SHA-256 in `EXPORT-MANIFEST.json`;
-3. absence of nested paths, symlinks, executable workflow files, private-key markers, and unapproved file types;
-4. the four synchronized human manuscripts: Chinese/English LaTeX and Chinese/English Markdown;
-5. their shared `MODEL-ID` and numerical anchors against `metadata.json`;
-6. the public destination and private canonical commit recorded by `PUBLIC-PROVENANCE.json`;
-7. that `Proof.lean` imports only Lean Core `Init` and contains none of the prohibited trust escapes;
-8. `lake build` in a fresh temporary project;
-9. `leanchecker --fresh` replay of the compiled proof;
-10. `#print axioms` output for the declarations named by the public allowlist.
+## Per-problem contract
 
-Each imported problem also receives `SYNC-RECEIPT.json`, which records the private canonical commit, manifest hash, Lean source hash, public destination, and required audit declarations.
+Every published problem directory contains:
 
-A new private problem cannot become public merely by changing the private repository: its problem ID and destination must first be added to the public validator's `PUBLICATIONS` table through an ordinary public-repository change.
+1. `paper.zh.tex` — Chinese LaTeX manuscript;
+2. `paper.en.tex` — English LaTeX manuscript;
+3. `paper.zh.md` — Chinese GitHub-renderable manuscript;
+4. `paper.en.md` — English GitHub-renderable manuscript;
+5. `Proof.lean` — machine-checked formal layer;
+6. `evidence.md` — external evidence and source-to-model bridge;
+7. `metadata.json`, `publication.json`, `PUBLIC-PROVENANCE.json`, and `README.md`.
+
+The four manuscripts carry the same machine-readable anchor map. They are expected to be independently readable documents, not generated summaries or redirects.
+
+## Verification
+
+`.github/workflows/verify-published-problems.yml` performs:
+
+- exact publication file-set validation;
+- bilingual and dual-format anchor equality;
+- minimum readability and document-structure checks;
+- evidence/provenance consistency checks;
+- `lake build` of every registered proof;
+- `leanchecker --fresh` replay;
+- `#print axioms` validation against Lean's standard trusted set;
+- rejection of `sorry`, `admit`, `native_decide`, custom axioms, `sorryAx`, and `Lean.trustCompiler`.
+
+A mathematical theorem remains conditional on the external facts stated in its evidence ledger. Passing CI establishes that the Lean deduction and publication contract are reproducible; it does not turn unverified hardware, source-code, or experimental assumptions into formal theorems.

@@ -25,11 +25,12 @@ These are **not** claims that real hardware can attain those rates. The bridge f
 ## Reproduce
 
 ```bash
+(cd Formal && sha256sum -c PROOF-SHA256)
 lake build
-lake env lean4checker --fresh Formal.Qwen38M1UltraBound
+lake env leanchecker --fresh Formal.Qwen38M1UltraBound
 lake env lean Formal/Qwen38M1UltraBound.lean
 ```
 
-The last command prints the axioms used by the audit declarations. CI rejects any axiom outside Lean's standard set `{propext, Classical.choice, Quot.sound}`.
+`Formal.lean` imports the main theorem module and `Formal` is the Lake default target, so `lake build` cannot report success while silently skipping the proof. The final command prints the axioms used by the audit declarations. CI rejects any axiom outside Lean's standard set `{propext, Classical.choice, Quot.sound}`.
 
 The canonical toolchain is pinned by `lean-toolchain`. Monthly attestations are written under `Formal/attestations/` after a successful scheduled verification.

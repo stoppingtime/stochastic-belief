@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "problem_id": "p0002-torchtitan-npu-qwen36-cp",
+  "model_id": "SP-P0002-TTNPU-Q36-CP-v1",
+  "directory_name": "TorchTitanNPUQwen36CP",
+  "title_zh": "TorchTitan-NPU override-refactor 中 Qwen3.6 Context Parallel 的语义正确性",
+  "title_en": "Semantic Correctness of Qwen3.6 Context Parallelism in TorchTitan-NPU override-refactor",
+  "toolchain": "leanprover/lean4:v4.33.0",
+  "publication_authority": "stoppingtime/stochastic-belief",
+  "archive_mirror": "stoppingtime/stochastic-problems",
+  "anchors": {
+    "MODEL-ID": "SP-P0002-TTNPU-Q36-CP-v1",
+    "OVERRIDE-COMMIT": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "TORCHTITAN-COMMIT": "c91448d20480c7b294314e68976823050002ebec",
+    "CP-DEGREE": "4",
+    "GLOBAL-SEQUENCE-LENGTH": "32768",
+    "LOCAL-SEQUENCE-LENGTH": "8192",
+    "FULL-ATTN-Q-HEADS": "24",
+    "FULL-ATTN-KV-HEADS": "4",
+    "GDN-QK-HEADS": "16",
+    "GDN-V-HEADS": "48"
+  },
+  "source": {
+    "repository": "botcanlearn/torchtitan-npu-upstream",
+    "upstream_repository": "cann/torchtitan-npu",
+    "branch": "override-refactor",
+    "commit": "7864d5dc17930667d663bbadd1ce2bc722de2753",
+    "tree": "a2083d3d601007d3a47a7200022d55ee89f90608",
+    "torchtitan_commit": "c91448d20480c7b294314e68976823050002ebec",
+    "files": {
+      "torchtitan_npu/override/qwen3_5/parallelize.py": "1600dbe56d3842c480319c8285c6abed135e1d8d",
+      "torchtitan_npu/override/qwen3_5/gated_delta.py": "35eaec0d1032938d15ee3229f7aa657a6d0726b8",
+      "torchtitan_npu/override/qwen3_5/varlen_attention.py": "ac81ee49016efefb6bef75b71b6eb7aa7ecadee1",
+      "torchtitan_npu/patches/torchtitan/distributed/context_parallel.py": "23c5538ca812ff34f330c8fde232568c7adb65cc",
+      "torchtitan_npu/patches/torchtitan/distributed/varlen_cp.py": "6b1230df171155954a8cf128f97f581b4d45fb82",
+      "torchtitan_npu/models/qwen3_5/config_registry.py": "2448b69407135cfb913ee2fe194f029776c1c9ec",
+      "requirements.txt": "1b4f49f86267fbff25f4643105211051756fcb34"
+    }
+  },
+  "formal_constants": {
+    "cp_degree": 4,
+    "global_sequence_length": 32768,
+    "local_sequence_length": 8192,
+    "full_attention_q_heads": 24,
+    "full_attention_kv_heads": 4,
+    "gated_delta_qk_heads": 16,
+    "gated_delta_v_heads": 48
+  },
+  "scope": {
+    "configuration": "qwen35_27b_long_text_sft",
+    "context_parallel_load_balancer": null,
+    "attention_backend": "varlen",
+    "claims": [
+      "sequence-to-head and head-to-sequence layouts are mutual inverses in the coordinate model",
+      "every head-separable exact operator commutes with the layout exchange",
+      "the local reset marker is equivalent to beginning at a document boundary",
+      "the causal key-prefix index range is sound and complete"
+    ],
+    "excluded_claims": [
+      "correctness of DTensor, HCCL, CANN, Triton or NPU kernels",
+      "bitwise equality in BF16",
+      "autograd implementation correctness",
+      "training convergence, checkpoint correctness or optimizer progress",
+      "correctness of any source revision other than the pinned commits"
+    ]
+  }
+}

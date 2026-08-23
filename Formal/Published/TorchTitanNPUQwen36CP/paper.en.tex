@@ -1,0 +1,303 @@
+% MODEL-ID: SP-P0002-TTNPU-Q36-CP-v1
+% OVERRIDE-COMMIT: 7864d5dc17930667d663bbadd1ce2bc722de2753
+% TORCHTITAN-COMMIT: c91448d20480c7b294314e68976823050002ebec
+% CP-DEGREE: 4
+% GLOBAL-SEQUENCE-LENGTH: 32768
+% LOCAL-SEQUENCE-LENGTH: 8192
+% FULL-ATTN-Q-HEADS: 24
+% FULL-ATTN-KV-HEADS: 4
+% GDN-QK-HEADS: 16
+% GDN-V-HEADS: 48
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,mathtools,amsthm,booktabs,geometry,hyperref,microtype,array}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newcommand{\Fin}{\operatorname{Fin}}
+\newcommand{\SeqToHead}{\operatorname{SequenceToHead}}
+\newcommand{\HeadToSeq}{\operatorname{HeadToSequence}}
+
+\title{Semantic Correctness of Qwen3.6 Context Parallelism\\in TorchTitan-NPU \texttt{override-refactor}}
+\author{Model ID: \texttt{SP-P0002-TTNPU-Q36-CP-v1}}
+\date{24 August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We formalize the layout semantics of Qwen3.6 context parallelism in a fixed TorchTitan-NPU revision. The implementation begins with contiguous sequence shards, redistributes projected Q, K, V and Gated DeltaNet tensors so that each context-parallel rank owns a subset of heads and the complete logical sequence, evaluates full attention or GDN in that view, and then restores sequence sharding. The evidence is pinned to TorchTitan-NPU commit \texttt{7864d5dc17930667d663bbadd1ce2bc722de2753} and its TorchTitan dependency \texttt{c91448d20480c7b294314e68976823050002ebec}.
+
+The redistribution is modeled as the finite-coordinate transposition
+\[
+(s,\ell,h,r)\longmapsto(h,s,\ell,r),
+\]
+where $s$ and $h$ are sequence-rank and head-rank coordinates, $\ell$ is a local sequence position, and $r$ is a local head. Lean 4 proves that the forward and reverse maps are mutual inverses. It then proves that every exact operator $F$ acting independently on the complete sequence of one head satisfies
+\[
+\HeadToSeq\bigl(F_{\mathrm{head}}(\SeqToHead(x))\bigr)=F_{\mathrm{ref}}(x).
+\]
+No linearity, statelessness or finite-window hypothesis is used, so the theorem covers both full attention and recurrent Gated DeltaNet at the layout-semantic level.
+
+For variable-length packed metadata, let $d$ be a document start, $a$ a contiguous local-run start, and $b$ its exclusive stop, with $d\le a<b$. Lean proves that the implementation's reset criterion is exact,
+\[
+b-a=b-d\iff a=d,
+\]
+and that the generated indices $d+j$ for $0\le j<b-d$ enumerate exactly the causal prefix $[d,b)$. The conclusion is conditional on explicit implementation contracts: DTensor/HCCL must realize the modeled transposition, and the NPU attention/GDN kernels must realize the declared head-local functions. The result does not claim verification of CANN, Triton, BF16 arithmetic, autograd, optimizer, checkpoint, or convergence behavior.
+\end{abstract}
+
+\section{Scope and frozen evidence}
+
+The object of study is reproducible rather than branch-relative:
+
+\begin{center}
+\begin{tabular}{p{0.34\linewidth}p{0.58\linewidth}}
+\toprule
+Object & Frozen value \\
+\midrule
+TorchTitan-NPU mirror & \texttt{botcanlearn/torchtitan-npu-upstream} \\
+Branch & \texttt{override-refactor} \\
+Commit & \texttt{7864d5dc17930667d663bbadd1ce2bc722de2753} \\
+Git tree & \texttt{a2083d3d601007d3a47a7200022d55ee89f90608} \\
+TorchTitan commit & \texttt{c91448d20480c7b294314e68976823050002ebec} \\
+Lean & 4.33.0, Core \texttt{Init} only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The repository path is named \texttt{qwen3\_5} because it hosts the implementation shared by the Qwen3.5/3.6 family. The attention override explicitly identifies its scope as ``Qwen3.5/3.6 Context Parallel.'' We retain the engineering name Qwen3.6 while grounding every assertion in full commits and file blobs.
+
+The frozen \texttt{qwen35\_27b\_long\_text\_sft} configuration selects
+\[
+P=4,\qquad L=32768,\qquad S=L/P=8192,
+\]
+uses variable-length attention, and sets \texttt{context\_parallel\_load\_balancer=None}. The main theorem therefore models contiguous equal-length sequence shards. The more general head-tail metadata path is not enabled in this configuration and is not silently included in the claim.
+
+The proof has three layers: the layout exchange is a bijection; head-local operators commute with it; and packed-run reset/prefix arithmetic is exact. Correctness of Python, DTensor, HCCL, CANN, or Triton remains a separate bridge obligation.
+
+\section{Implementation correspondence}
+
+\subsection{Sequence-to-head exchange}
+
+In \texttt{parallelize.py}, \texttt{sequence\_to\_head\_shard} interprets the local tensor with placement \texttt{Shard(1)} and redistributes it to a shard on the head dimension. \texttt{head\_to\_sequence\_shard} reverses the placement. \texttt{exchange\_sequence\_heads} splits each projected tensor by head group, packs rank-indexed pieces, performs the redistribution, and then separates Q, K, V, decay, beta, or the corresponding attention tensors again.
+
+Before the exchange, one rank owns a sequence interval and all heads. Afterwards it owns a head subset and all logical sequence intervals. Temporary packing addresses are not part of the semantics; the proof tracks only the logical coordinates of each value.
+
+\subsection{One structural theorem for attention and GDN}
+
+Causal attention and Gated DeltaNet have different sequence algorithms. Attention forms weighted causal combinations; GDN uses causal convolution and a gated recurrence. Both nevertheless satisfy the same context-parallel interface: the output for one head depends on the complete logical sequence for that head and not on values belonging to another output head. The formal operator is allowed to be nonlinear, recurrent, stateful along the sequence, and sensitive to reset metadata.
+
+The Q/K/V, decay, beta and output-gate projections are token-local. Separate Lean lemmas prove that pointwise maps commute with both layout changes, so the full pipeline is not justified by an unstated ``obvious reshape'' step.
+
+\section{Finite coordinate model}
+
+Let $P$ be the context-parallel degree, $S$ the local sequence length, $H$ the local number of heads in a head shard, and $\alpha$ the element type. The sequence view is
+\[
+X:\Fin(P)\times\Fin(S)\times\Fin(P)\times\Fin(H)\to\alpha,
+\]
+with coordinates $(s,\ell,h,r)$. The head view is
+\[
+Y:\Fin(P)\times\Fin(P)\times\Fin(S)\times\Fin(H)\to\alpha,
+\]
+with coordinates $(h,s,\ell,r)$.
+
+Define
+\begin{align}
+(TX)(h,s,\ell,r)&=X(s,\ell,h,r), \tag{1}\\
+(T^{-1}Y)(s,\ell,h,r)&=Y(h,s,\ell,r). \tag{2}
+\end{align}
+The use of $\Fin(n)$ makes bounds part of the type: an out-of-range rank, token, or head is not a legal coordinate.
+
+\begin{theorem}[Sequence-view round trip]
+For every $X$,
+\[
+T^{-1}(TX)=X.
+\]
+\end{theorem}
+
+\begin{proof}
+At an arbitrary legal coordinate $(s,\ell,h,r)$,
+\[
+(T^{-1}(TX))(s,\ell,h,r)=(TX)(h,s,\ell,r)=X(s,\ell,h,r).
+\]
+Function extensionality gives the result.
+\end{proof}
+
+\begin{theorem}[Head-view round trip]
+For every $Y$,
+\[
+T(T^{-1}Y)=Y.
+\]
+\end{theorem}
+
+The proof is symmetric. Together the statements establish a bijection. Preserving only the number of entries would not be enough, because duplication and omission could cancel in the count; mutual inverses exclude that possibility.
+
+The corresponding Lean declarations are \texttt{headToSequence\_sequenceToHead}, \texttt{sequenceToHead\_headToSequence}, and the pointwise form \texttt{roundTrip\_preserves\_entry}.
+
+\section{Commutation with head-local operators}
+
+Fix a head coordinate $(h,r)$. Its complete logical sequence is
+\[
+x_{h,r}(s,\ell)=X(s,\ell,h,r).
+\]
+Let
+\[
+F:(\Fin(P)\times\Fin(S)\to\alpha)
+\to(\Fin(P)\times\Fin(S)\to\beta)
+\]
+be any exact operator on one head fiber. The reference computation is
+\[
+(F_{\mathrm{ref}}X)(s,\ell,h,r)=F(x_{h,r})(s,\ell). \tag{3}
+\]
+The context-parallel computation applies $T$, evaluates $F$ in the head view, and then applies $T^{-1}$.
+
+\begin{theorem}[Head-wise context-parallel equivalence]
+For every $F$ and $X$,
+\[
+T^{-1}\bigl(F_{\mathrm{head}}(TX)\bigr)=F_{\mathrm{ref}}X. \tag{4}
+\]
+\end{theorem}
+
+\begin{proof}
+At $(s,\ell,h,r)$, the sequence supplied to $F$ by the CP path is
+\[
+(s',\ell')\mapsto(TX)(h,s',\ell',r).
+\]
+By (1), this function is pointwise equal to
+\[
+(s',\ell')\mapsto X(s',\ell',h,r)=x_{h,r}.
+\]
+The restored value is therefore $F(x_{h,r})(s,\ell)$, exactly the reference value in (3). Function extensionality proves (4).
+\end{proof}
+
+Lean proves this for arbitrary types, dimensions, and functions in \texttt{headwise\_context\_parallel\_correct} and \texttt{contextParallelFunction\_eq\_reference}. Full attention and GDN are instances only after their kernels satisfy the stated per-head contract.
+
+\subsection{Token-local maps}
+
+For a pointwise map $f:\alpha\to\beta$,
+\[
+T(f(X))=f(TX),\qquad T^{-1}(f(Y))=f(T^{-1}Y).
+\]
+The Lean lemmas \texttt{sequenceToHead\_map\_commutes} and \texttt{headToSequence\_map\_commutes} record these identities. Input projections, the exchange, the head-local kernel, reverse exchange, and output maps can therefore be composed without skipping a semantic step.
+
+\section{A limited backward corollary}
+
+Equation (4) is equality of forward functions, not numerical agreement on a chosen sample. Every extensional semantic observer must consequently agree on the CP and reference functions. If a mathematical derivative constructor $D$ is extensional, then
+\[
+D(T^{-1}\circ F_{\mathrm{head}}\circ T)=D(F_{\mathrm{ref}}). \tag{5}
+\]
+Lean expresses the general principle as \texttt{every\_extensional\_observer\_agrees}.
+
+This is not verification of the PyTorch/NPU backward implementation. Actual gradient equality additionally requires correct kernel backward functions, correct collective adjoints, controlled floating-point and reduction error, and intact graph/checkpoint hooks. A skipped optimizer step or an incorrect checkpoint writer is likewise outside the layout theorem. Thus unchanged saved weights are not contradicted by (4); they demand tests at the gradient, optimizer, and serialization layers.
+
+\section{Variable-length packed metadata}
+
+Let a packed document start at global position $d$. A contiguous local run occupies $[a,b)$ with
+\[
+d\le a<b.
+\]
+Its local query length is
+\[
+q=b-a, \tag{6}
+\]
+while the same-document causal K/V prefix $[d,b)$ has length
+\[
+k=b-d. \tag{7}
+\]
+
+\begin{theorem}[Exact reset criterion]
+Under $d\le a<b$,
+\[
+q=k\iff a=d. \tag{8}
+\]
+\end{theorem}
+
+\begin{proof}
+Substitution reduces the left side to $b-a=b-d$. Both differences are taken within their ordered ranges, so equality holds exactly when the subtrahends agree. The reverse direction follows by substitution.
+\end{proof}
+
+This is the arithmetic content of comparing local Q-run and causal K-prefix lengths when rebuilding document resets.
+
+Define the generated key index
+\[
+K(j)=d+j,\qquad 0\le j<b-d. \tag{9}
+\]
+
+\begin{theorem}[Exact causal-prefix indices]
+\[
+\{K(j)\mid0\le j<b-d\}
+=\{x\in\mathbb N\mid d\le x<b\}. \tag{10}
+\]
+\end{theorem}
+
+\begin{proof}
+A legal $j$ satisfies $d\le d+j<b$, proving soundness. Conversely, for $d\le x<b$, choose $j=x-d$; then $0\le j<b-d$ and $d+j=x$, proving completeness.
+\end{proof}
+
+Lean theorem \texttt{prefixKey\_exact} proves both directions. The half-open interval excludes $b$ without dropping $b-1$, making the boundary convention explicit.
+
+\section{Frozen CP=4 instance}
+
+The configuration satisfies
+\[
+32768=4\times8192.
+\]
+The relevant head partitions are:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Head family & Global count & Count per head rank \\
+\midrule
+full-attention Q & 24 & 6 \\
+full-attention KV & 4 & 1 \\
+GDN Q/K & 16 & 4 \\
+GDN V & 48 & 12 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Lean theorems \texttt{concrete\_sequence\_partition} and \texttt{concrete\_head\_partitions} check both quotients and zero remainders. If a head count were not divisible by the CP degree, replication, padding, or uneven shards would require a different coordinate model.
+
+\section{Formal contracts and implementation modules}
+
+\begin{center}
+\begin{tabular}{p{0.22\linewidth}p{0.36\linewidth}p{0.34\linewidth}}
+\toprule
+Formal object & Frozen implementation & Remaining bridge obligation \\
+\midrule
+$T$ & \texttt{sequence\_to\_head\_shard}, \texttt{exchange\_sequence\_heads} & DTensor/HCCL realizes the transposition \\
+$T^{-1}$ & \texttt{head\_to\_sequence\_shard} & reverse exchange is the inverse \\
+attention operator & \texttt{AscVarlenAttention.forward} & fused TND attention has declared causal semantics \\
+GDN operator & \texttt{ContextParallelGatedDeltaNet.forward} & convolution, recurrence, reset, and backward are correct \\
+run $(d,a,b)$ & \texttt{CPVarlenMetadata.from\_global} & global/local positions describe the true run \\
+reset criterion & \texttt{build\_sequence\_metadata} & compared lengths refer to the same segment \\
+prefix $[d,b)$ & \texttt{k\_global\_gather\_indices} & gather returns the indexed values in order \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Remaining engineering validation}
+
+\paragraph{Permutation tests.}
+Use integer tensors whose values uniquely encode tensor kind, token, rank, and head. Check sequence-to-head-to-sequence identity element by element for several CP degrees and for simultaneous packing/splitting of all projected tensors.
+
+\paragraph{Kernel/reference tests.}
+On small FP64 or FP32 inputs, compare CP full attention, GDN, and causal convolution with an unsharded reference. Test forward values, input gradients, and parameter gradients independently. BF16 should use an explicit tolerance contract rather than being mixed with exact semantic tests.
+
+\paragraph{Packed-boundary enumeration.}
+Enumerate document partitions and CP cuts for short sequences. Verify that resets occur exactly at document starts and that each query sees the exact same-document causal prefix, including length-one documents and cuts both on and inside boundaries.
+
+\paragraph{Training-state tests.}
+Assert that expected parameters receive nonzero gradients, optimizer steps change parameters, serialized checkpoints equal the in-memory post-step state, and resume agrees with an uninterrupted next step within a declared tolerance.
+
+\section{Conclusion}
+
+The machine-checked result establishes the discrete semantic core of the frozen Qwen3.6 CP path: the sequence/head exchange is a bijection; every exact head-local operator commutes with it; the packed-run reset criterion is necessary and sufficient; and the generated K/V prefix equals the intended half-open interval.
+
+If the concrete collective, kernels, and metadata mapping satisfy their bridge contracts, the CP forward function is extensionally identical to the unsharded reference. This rules out a broad class of rank/head/sequence indexing errors at the model level and supplies precise targets for implementation tests. It does not rule out numerical-kernel defects, collective runtime failures, autograd disconnections, skipped optimizer work, or checkpoint bugs; those claims require evidence at their own layers.
+
+\end{document}

@@ -9,8 +9,9 @@ The historical Python experiments remain at the repository root. New machine-che
 The repository verifies a conditional bandwidth roofline for **Qwen3.8-27B Q4_K_M on M1 Ultra**. The strengthened theorem certifies exact milli-token/s ceilings *inside the declared abstract model*, while keeping the hardware/GGUF evidence boundary explicit.
 
 ```bash
+(cd Formal && sha256sum -c PROOF-SHA256)
 lake build
-lake env lean4checker --fresh Formal.Qwen38M1UltraBound
+lake env leanchecker --fresh Formal.Qwen38M1UltraBound
 ```
 
 ## Lean resource snapshots

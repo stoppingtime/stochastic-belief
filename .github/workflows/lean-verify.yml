@@ -41,6 +41,13 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           "$HOME/.elan/bin/lean" --version
 
+      - name: Verify pinned proof hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd Formal
+          sha256sum -c PROOF-SHA256
+
       - name: Lake build
         shell: bash
         run: |
@@ -48,12 +55,12 @@ jobs:
           export PATH="$HOME/.elan/bin:$PATH"
           lake build
 
-      - name: Re-check stored proof with lean4checker
+      - name: Re-check stored proof with leanchecker
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.elan/bin:$PATH"
-          lake env lean4checker --fresh Formal.Qwen38M1UltraBound
+          lake env leanchecker --fresh Formal.Qwen38M1UltraBound
 
       - name: Axiom and source audit
         shell: bash

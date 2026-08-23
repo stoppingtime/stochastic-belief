@@ -1,0 +1,268 @@
+% MODEL-ID: SP-P0001-Q38-M1U-Q4-v1
+% STATIC-FLOOR-BYTES: 15660093440
+% KV-BYTES-PER-CONTEXT-TOKEN: 65536
+% RAW-BUS-BPS: 819200000000
+% APPLE-RATED-BPS: 800000000000
+% RAW-CTX0-MILLI-TPS: 52311
+% APPLE-CTX0-MILLI-TPS: 51085
+% RAW-CTX262144-MILLI-TPS: 24945
+% APPLE-CTX262144-MILLI-TPS: 24360
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,mathtools,booktabs,geometry,hyperref,microtype}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newcommand{\bytes}{\operatorname{byte}}
+\newcommand{\tps}{\operatorname{token/s}}
+
+\title{A Bandwidth Ceiling for Single-Token Qwen3.8-27B Q4\_K\_M Decoding on M1 Ultra}
+\author{Model ID: SP-P0001-Q38-M1U-Q4-v1}
+\date{23 August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study batch-one, non-speculative, non-MTP autoregressive decoding of Qwen3.8-27B Q4\_K\_M on M1 Ultra. Rather than identifying the total GGUF file size with DRAM traffic per token, we derive a conservative encoded-byte floor from the architecture and quantization-block formats, then state explicitly the physical premise that actual DRAM traffic is no smaller than this floor. The mathematical argument is a conservation law: if each token requires at least $D$ bytes to cross DRAM and the memory path can carry at most $B$ bytes per second, then throughput must satisfy $rD\le B$. The Lean development measures rate in milli-token/s, eliminating floating-point boundary issues. For short context with \texttt{cacheCarry=0}, the exact discrete ceiling of the abstract model is $51.085$ token/s under Apple's published $800\times10^9$ byte/s bandwidth and $52.311$ token/s under a more permissive $819.2\times10^9$ byte/s raw line-rate scenario. At context length $262144$, the corresponding ceilings are $24.360$ and $24.945$ token/s. Exactness is model-internal; it is not an empirical attainability claim.
+\end{abstract}
+
+\section{Scope, quantities, and units}
+
+We consider one ordinary target-model decode step producing one target token. The principal instance fixes batch size one, excludes speculative decoding and MTP, stores the growing full-attention KV cache in FP16, and takes \texttt{cacheCarry=0}. Thus no cross-token on-chip residency is silently deducted from the DRAM floor.
+
+Let $B\in\mathbb N$ denote a memory-bandwidth cap in byte/s, $r\in\mathbb N$ a rate in milli-token/s, $A\in\mathbb N$ the actual DRAM bytes transferred per generated token, and $D(L,C)$ a modeled lower bound on those bytes at context length $L$ with an allowance $C$ for useful on-chip data retained across decode steps.
+
+With rate measured in thousandths of a token per second, bandwidth feasibility is the integer relation
+\begin{equation}
+  rA\le1000B.
+  \label{eq:feasible}
+\end{equation}
+No floating-point approximation is involved in this definition.
+
+\section{Evidence layer versus theorem layer}
+
+The M1 Ultra bandwidth figure, Qwen3.8-27B architectural dimensions, GGML block encodings, and the tensor-class assumptions of the selected GGUF artifact are external facts. Their provenance is recorded in \texttt{evidence.md}. Lean proves deductions from mathematical premises; it does not authenticate vendor pages or model artifacts.
+
+The physical bridge is therefore stated explicitly:
+\begin{equation}
+  D(L,C)\le A.
+  \label{eq:bridge}
+\end{equation}
+Every throughput theorem below is conditional on equations~\eqref{eq:feasible} and~\eqref{eq:bridge}.
+
+This is also why the proof does not use ``GGUF file size divided by bandwidth.'' File size is not the same quantity as DRAM traffic for one decode step: files include metadata and alignment, while cache residency may alter memory traffic. We instead construct a smaller tensor-by-tensor representation floor. Omitting additional real traffic only makes the final ceiling more permissive.
+
+\section{Static encoded-byte floor}
+
+For the Qwen3.8-27B text model we use
+\begin{equation}
+  H=5120,\qquad I=17408,\qquad N_{\mathrm{layer}}=64,
+\end{equation}
+with 48 Gated DeltaNet layers, 16 full-attention layers, and vocabulary size $V=248320$.
+
+\subsection{Feed-forward networks}
+Each SwiGLU FFN contains gate, up, and down matrices. Hence
+\begin{equation}
+\begin{aligned}
+N_{\mathrm{FFN}}
+&=64\times3\times5120\times17408\\
+&=17\,112\,760\,320.
+\end{aligned}
+\label{eq:ffn}
+\end{equation}
+
+\subsection{Gated DeltaNet projections}
+There are 16 Q/K heads and 48 V heads of dimension 128, so
+\begin{equation}
+ d_{QK}=2048,\qquad d_V=6144.
+\end{equation}
+The floor includes, per GDN layer,
+\[
+W_{qkv}:5120\to(2d_{QK}+d_V),\quad
+W_z:5120\to d_V,\quad
+W_o:d_V\to5120.
+\]
+Across 48 layers this contributes
+\begin{equation}
+  N_{\mathrm{GDN,Q4}}=5\,536\,481\,280.
+  \label{eq:gdn}
+\end{equation}
+The selected recipe counts \texttt{in\_proj\_a} and \texttt{in\_proj\_b} as F32, giving
+\begin{equation}
+  N_{\mathrm{SSM,F32}}=48\times2\times5120\times48
+  =23\,592\,960.
+  \label{eq:ssm}
+\end{equation}
+
+\subsection{Full attention}
+Full attention has 24 Q heads, 4 KV heads, and head dimension 256. Because the Q projection also carries the output gate, its output width is counted as $2\times24\times256$. The Q/K/V/O matrices over 16 layers contain
+\begin{equation}
+  N_{\mathrm{FA,Q8}}=1\,677\,721\,600
+  \label{eq:fa}
+\end{equation}
+weights.
+
+\subsection{Output projection}
+The input embedding and language-model output head are untied. A decode step does not stream the entire input embedding table, whereas producing all logits requires the output matrix. We therefore retain
+\begin{equation}
+  N_{\mathrm{out,Q6}}=248320\times5120
+  =1\,271\,398\,400.
+  \label{eq:out}
+\end{equation}
+
+\subsection{Block-encoded bytes}
+We use
+\[
+\mathrm{Q4_K}:256\to144\ \bytes,
+\quad
+\mathrm{Q6_K}:256\to210\ \bytes,
+\]
+\[
+\mathrm{Q8_0}:32\to34\ \bytes,
+\quad
+\mathrm{F32}:1\to4\ \bytes.
+\]
+All relevant tensor counts are block-aligned. Define
+\begin{equation}
+\begin{aligned}
+D_{\mathrm{static}}
+={}&144\frac{N_{\mathrm{FFN}}+N_{\mathrm{GDN,Q4}}}{256}\\
+&+34\frac{N_{\mathrm{FA,Q8}}}{32}
++4N_{\mathrm{SSM,F32}}
++210\frac{N_{\mathrm{out,Q6}}}{256}.
+\end{aligned}
+\label{eq:static}
+\end{equation}
+Substituting equations~\eqref{eq:ffn}--\eqref{eq:out} gives
+\begin{equation}
+  \boxed{D_{\mathrm{static}}=15\,660\,093\,440\ \bytes/token}.
+  \label{eq:staticvalue}
+\end{equation}
+
+Equation~\eqref{eq:staticvalue} is deliberately a lower bound at the representation level. RMSNorm vectors, convolution weights, small state and bias tensors, and kernel-intermediate memory traffic are omitted. Such omissions reduce $D$ and therefore increase the permitted throughput ceiling, which is the conservative direction for an impossibility result.
+
+\section{Context-dependent KV term}
+
+Only the 16 full-attention layers carry a KV cache that grows linearly with context. One historical token contributes
+\begin{equation}
+\begin{aligned}
+D_{\mathrm{KV/token}}
+&=16\times4\times256\times2\times2\\
+&=65\,536\ \bytes/\text{context-token}.
+\end{aligned}
+\label{eq:kv}
+\end{equation}
+Thus
+\begin{equation}
+  R(L)=15\,660\,093\,440+65\,536L.
+  \label{eq:R}
+\end{equation}
+If $C$ bytes can remain usefully resident on chip between consecutive decode steps, define
+\begin{equation}
+  D(L,C)=\max\{0,R(L)-C\}.
+  \label{eq:D}
+\end{equation}
+The principal result uses $C=0$. This is not a claim that caches do not exist; it is a refusal to equate an unverified cache-capacity number with useful cross-token residency.
+
+\section{General bandwidth theorem}
+
+\paragraph{Theorem 1.}
+Let $B,r,A,D,T\in\mathbb N$. If
+\begin{equation}
+ D\le A,\qquad rA\le1000B,
+ \qquad1000B<TD,
+ \label{eq:premises}
+\end{equation}
+then $r<T$.
+
+\paragraph{Proof.}
+Assume instead that $r\ge T$. Since $A\ge D$, monotonicity of multiplication on natural numbers gives $TD\le rA$. Bandwidth feasibility gives $rA\le1000B$, hence $TD\le1000B$. But equation~\eqref{eq:premises} also states $1000B<TD$, a contradiction. Therefore $r<T$.\hfill$\square$
+
+The theorem itself is independent of neural-network details. Architecture is used only to establish a defensible $D$; the final implication is ordinary conservation arithmetic.
+
+\section{Exact discrete ceiling}
+
+If an integer $q$ satisfies
+\begin{equation}
+  qD\le1000B<(q+1)D,
+  \label{eq:exact}
+\end{equation}
+then in the favorable floor-traffic model $A=D$, the rate $q$ is feasible while $q+1$ is impossible. Hence $q$ is the exact maximum at milli-token/s granularity.
+
+This model-internal feasibility is not a hardware-attainability claim. A real implementation may have $A>D$, fail to sustain the bandwidth cap, or incur additional scheduling and kernel overheads.
+
+\section{Numerical certificates}
+
+\subsection{Apple's 800 GB/s specification}
+Set
+\[
+B_{\mathrm{Apple}}=800\,000\,000\,000\ \bytes/s,
+\qquad L=C=0.
+\]
+Then $D=15\,660\,093\,440$ and
+\begin{equation}
+51\,085D\le1000B_{\mathrm{Apple}}<51\,086D.
+\end{equation}
+Therefore
+\begin{equation}
+  \boxed{r_{\max}=51.085\ \tps}.
+\end{equation}
+
+\subsection{The 819.2 GB/s raw line-rate scenario}
+Set
+\[
+B_{\mathrm{raw}}=819\,200\,000\,000\ \bytes/s.
+\]
+At short context,
+\begin{equation}
+52\,311D\le1000B_{\mathrm{raw}}<52\,312D,
+\end{equation}
+so
+\begin{equation}
+  \boxed{r_{\max}=52.311\ \tps}.
+\end{equation}
+
+\subsection{Context length $L=262144$}
+Equation~\eqref{eq:R} gives
+\begin{equation}
+R(262144)
+=15\,660\,093\,440+65\,536\times262\,144
+=32\,839\,962\,624\ \bytes/token.
+\end{equation}
+The adjacent-integer certificates yield
+\begin{equation}
+\boxed{
+\begin{aligned}
+800\text{ GB/s}:&\quad24.360\ \tps,\\
+819.2\text{ GB/s}:&\quad24.945\ \tps.
+\end{aligned}}
+\end{equation}
+
+\section{Interpretation boundary}
+
+The numerical ceilings are conditional statements, not unconditional laws of the physical M1 Ultra. The 800 GB/s quantity is Apple's product specification. The 819.2 GB/s quantity is a more permissive raw line-rate scenario. Equation~\eqref{eq:staticvalue} is a lower bound derived from frozen tensor classes and block encodings. Equation~\eqref{eq:bridge} is the physical premise connecting real execution to that representation floor.
+
+If future microarchitectural evidence establishes stable cross-token residency for part of the relevant representation, the correct model change is to increase $C$ and re-instantiate the theorem. Speculative decoding and MTP are likewise outside scope because one target verification may correspond to multiple accepted output tokens, changing the measured output-token rate.
+
+\section{Formal verification}
+
+The machine-checkable development is \texttt{Proof.lean}. The intended commands are
+\begin{verbatim}
+lake build
+lake env leanchecker --fresh Problems.Qwen38M1UltraQ4.Proof
+lake env lean Problems/Qwen38M1UltraQ4/Proof.lean
+\end{verbatim}
+CI checks the reported axiom set against a subset of Lean's standard $\{\texttt{propext},\texttt{Classical.choice},\texttt{Quot.sound}\}$ set and rejects \texttt{sorryAx} and \texttt{Lean.trustCompiler}.
+
+The claim certified by Lean is therefore best written as
+\[
+\boxed{
+\text{external evidence and physical premises}
+\Longrightarrow
+\text{the stated discrete throughput ceilings}}
+\]
+rather than treating the evidence itself as if it had been proved in the kernel.
+
+\end{document}

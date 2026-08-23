@@ -1,0 +1,274 @@
+% MODEL-ID: SP-P0001-Q38-M1U-Q4-v1
+% STATIC-FLOOR-BYTES: 15660093440
+% KV-BYTES-PER-CONTEXT-TOKEN: 65536
+% RAW-BUS-BPS: 819200000000
+% APPLE-RATED-BPS: 800000000000
+% RAW-CTX0-MILLI-TPS: 52311
+% APPLE-CTX0-MILLI-TPS: 51085
+% RAW-CTX262144-MILLI-TPS: 24945
+% APPLE-CTX262144-MILLI-TPS: 24360
+
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb,mathtools,booktabs,geometry,hyperref,microtype}
+\geometry{margin=27mm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\newcommand{\bytes}{\operatorname{byte}}
+\newcommand{\tps}{\operatorname{token/s}}
+\newcommand{\mtps}{\operatorname{milli\text{-}token/s}}
+
+\title{M1 Ultra 上 Qwen3.8-27B Q4\_K\_M 单 token 解码的带宽上界}
+\author{Model ID: SP-P0001-Q38-M1U-Q4-v1}
+\date{2026-08-23}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文研究 batch=1、非 speculative、非 MTP 的 Qwen3.8-27B Q4\_K\_M 自回归解码在 M1 Ultra 上的单 token 带宽上界。证明不把 GGUF 文件总大小直接视为每 token 的 DRAM 流量，而是从模型结构和量化块编码构造保守的表示字节下界，再把“真实 DRAM 流量不小于该下界”作为显式物理前提。随后使用数据传输守恒：若每 token 至少需要跨 DRAM 传输 $D$ 字节，内存通路每秒至多传输 $B$ 字节，则吞吐率必受 $rD\le B$ 约束。形式化证明将速率离散为 milli-token/s，避免浮点舍入。短上下文、\texttt{cacheCarry=0} 时，在 Apple 公布的 $800\times10^9$ byte/s 口径下，模型内精确离散上界为 $51.085$ token/s；在更宽松的 $819.2\times10^9$ byte/s 原始线速口径下为 $52.311$ token/s。上下文达到 $262144$ 时，两者分别降为 $24.360$ 与 $24.945$ token/s。这里的“精确”只属于本文抽象模型，不等同于真实硬件可达速度。
+\end{abstract}
+
+\section{问题、对象与单位}
+
+本文只讨论一次普通 target-model decode step 产生一个 target token 的情形。固定 batch size 为 1，不使用 speculative decoding 和 MTP，full-attention KV cache 使用 FP16。主结果取 \texttt{cacheCarry=0}，即不预先假定有一部分权重能够跨 token 稳定驻留片上。
+
+设 $B\in\mathbb N$ 为带宽上限，单位 byte/s；$r\in\mathbb N$ 为速率，单位 milli-token/s；$A\in\mathbb N$ 为真实执行每生成一个 token 实际跨 DRAM 的字节数，单位 byte/token；$D(L,C)$ 为本文在上下文长度 $L$、片上常驻扣除量 $C$ 下构造的 DRAM 流量下界。
+
+由于 $r$ 用 milli-token/s 表示，带宽可行性写成纯整数关系
+\begin{equation}
+  rA\le 1000B.
+  \label{eq:feasible}
+\end{equation}
+这一定义避免了浮点数和边界舍入。
+
+\section{证据层与定理层}
+
+M1 Ultra 的带宽规格、Qwen3.8-27B 的结构参数、GGML 块编码以及具体 GGUF 的 tensor 类型都属于外部事实。它们的来源记录在 \texttt{evidence.md}；Lean 不负责证明网页或模型制品是真的。
+
+因此必须显式提出物理桥梁：
+\begin{equation}
+  D(L,C)\le A.
+  \label{eq:bridge}
+\end{equation}
+后面的定理只声称：一旦式~\eqref{eq:feasible} 与式~\eqref{eq:bridge} 成立，速率上界随之成立。
+
+这也是本文不使用“GGUF 文件大小除以带宽”作为正式证明的原因。文件总大小和一次 decode step 的 DRAM 流量不是同一个量。文件包含 metadata 和对齐填充；片上缓存也可能改变 DRAM 访问。本文改为逐类统计必需的大 tensor，并故意漏掉一部分小流量，使下界更小、吞吐上界更宽松。
+
+\section{静态表示字节下界}
+
+Qwen3.8-27B 文本模型取
+\begin{equation}
+  H=5120,\qquad I=17408,\qquad N_{\mathrm{layer}}=64,
+\end{equation}
+其中有 48 个 Gated DeltaNet 层和 16 个 full-attention 层，词表大小 $V=248320$。
+
+\subsection{FFN}
+每层 SwiGLU 有 gate、up、down 三个大矩阵。因此
+\begin{equation}
+\begin{aligned}
+N_{\mathrm{FFN}}
+&=64\times3\times5120\times17408\\
+&=17\,112\,760\,320.
+\end{aligned}
+\label{eq:ffn}
+\end{equation}
+
+\subsection{Gated DeltaNet}
+线性注意力的 Q/K head 数为 16，V head 数为 48，head dimension 为 128，于是
+\begin{equation}
+ d_{QK}=2048,\qquad d_V=6144.
+\end{equation}
+每层纳入三个大投影
+\[
+W_{qkv}:5120\to(2d_{QK}+d_V),\quad
+W_z:5120\to d_V,\quad
+W_o:d_V\to5120.
+\]
+48 层合计
+\begin{equation}
+  N_{\mathrm{GDN,Q4}}=5\,536\,481\,280.
+  \label{eq:gdn}
+\end{equation}
+另外，选定量化配置把 \texttt{in\_proj\_a} 与 \texttt{in\_proj\_b} 按 F32 计，因此
+\begin{equation}
+  N_{\mathrm{SSM,F32}}=48\times2\times5120\times48
+  =23\,592\,960.
+  \label{eq:ssm}
+\end{equation}
+
+\subsection{Full attention}
+full attention 使用 24 个 Q head、4 个 KV head，head dimension 为 256。Q projection 还包含 output gate，因此 Q 输出宽度按 $2\times24\times256$ 计。16 层 Q/K/V/O 合计
+\begin{equation}
+  N_{\mathrm{FA,Q8}}=1\,677\,721\,600.
+  \label{eq:fa}
+\end{equation}
+
+\subsection{输出头}
+input embedding 与 LM output head 不共享权重。decode 时不需要扫描整个 input embedding table，但完整 logits 需要输出矩阵，因此
+\begin{equation}
+  N_{\mathrm{out,Q6}}=248320\times5120
+  =1\,271\,398\,400.
+  \label{eq:out}
+\end{equation}
+
+\subsection{编码字节数}
+采用
+\[
+\mathrm{Q4_K}:256\to144\ \bytes,
+\quad
+\mathrm{Q6_K}:256\to210\ \bytes,
+\]
+\[
+\mathrm{Q8_0}:32\to34\ \bytes,
+\quad
+\mathrm{F32}:1\to4\ \bytes.
+\]
+相关 tensor 数量都满足块对齐。定义
+\begin{equation}
+\begin{aligned}
+D_{\mathrm{static}}
+={}&144\frac{N_{\mathrm{FFN}}+N_{\mathrm{GDN,Q4}}}{256}\\
+&+34\frac{N_{\mathrm{FA,Q8}}}{32}
++4N_{\mathrm{SSM,F32}}
++210\frac{N_{\mathrm{out,Q6}}}{256}.
+\end{aligned}
+\label{eq:static}
+\end{equation}
+代入式~\eqref{eq:ffn}--\eqref{eq:out} 得
+\begin{equation}
+  \boxed{D_{\mathrm{static}}=15\,660\,093\,440\ \bytes/token}.
+  \label{eq:staticvalue}
+\end{equation}
+
+这里刻意没有计入 RMSNorm、卷积、小型 state/bias、kernel 中间读写等额外流量。对上界证明而言，遗漏真实流量会减小 $D$、增大允许的吞吐上限，因此不会错误地把真实机器排除在外。
+
+\section{KV cache 的上下文项}
+
+只有 16 个 full-attention 层的 KV 随上下文线性增长。每个历史 token 的 FP16 KV 字节数是
+\begin{equation}
+\begin{aligned}
+D_{\mathrm{KV/token}}
+&=16\times4\times256\times2\times2\\
+&=65\,536\ \bytes/\text{context-token}.
+\end{aligned}
+\label{eq:kv}
+\end{equation}
+因此
+\begin{equation}
+  R(L)=15\,660\,093\,440+65\,536L.
+  \label{eq:R}
+\end{equation}
+若允许有 $C$ 字节跨 step 稳定留在片上，则定义
+\begin{equation}
+  D(L,C)=\max\{0,R(L)-C\}.
+  \label{eq:D}
+\end{equation}
+主结果取 $C=0$。这不是宣称 cache 不存在，而是避免未经证实地把某个 cache 容量等同于可跨 token 使用的有效权重驻留量。
+
+\section{一般带宽上界定理}
+
+\paragraph{定理 1.}
+设 $B,r,A,D,T\in\mathbb N$。若
+\begin{equation}
+ D\le A,\qquad rA\le1000B,
+ \qquad 1000B<TD,
+ \label{eq:premises}
+\end{equation}
+则 $r<T$。
+
+\paragraph{证明.}
+反设 $r\ge T$。由 $A\ge D$ 和自然数乘法的单调性，
+\[
+  TD\le rA.
+\]
+再由带宽可行性 $rA\le1000B$，得到
+\[
+  TD\le1000B.
+\]
+但式~\eqref{eq:premises} 同时给出 $1000B<TD$，矛盾。因此 $r<T$。\hfill$\square$
+
+这个定理与神经网络本身无关。模型结构只用于建立 $D$；一旦 $D$ 成立，上界来自数据传输守恒。
+
+\section{精确离散上界}
+
+若整数 $q$ 满足
+\begin{equation}
+  qD\le1000B<(q+1)D,
+  \label{eq:exact}
+\end{equation}
+那么在最有利的 floor-traffic 模型 $A=D$ 中，$q$ 可行而 $q+1$ 不可行。因此 $q$ 是 milli-token/s 粒度下的精确最大整数。
+
+“模型内可行”不等于“真实硬件可达”。真实执行通常还有额外流量、调度损失和带宽利用率损失。
+
+\section{数值证书}
+
+\subsection{Apple 800 GB/s}
+取
+\[
+B_{\mathrm{Apple}}=800\,000\,000\,000\ \bytes/s,
+\qquad L=C=0.
+\]
+此时 $D=15\,660\,093\,440$，并且
+\begin{equation}
+51\,085D\le1000B_{\mathrm{Apple}}<51\,086D.
+\end{equation}
+所以
+\begin{equation}
+  \boxed{r_{\max}=51.085\ \tps}.
+\end{equation}
+
+\subsection{819.2 GB/s 原始线速}
+取
+\[
+B_{\mathrm{raw}}=819\,200\,000\,000\ \bytes/s.
+\]
+短上下文时
+\begin{equation}
+52\,311D\le1000B_{\mathrm{raw}}<52\,312D,
+\end{equation}
+故
+\begin{equation}
+  \boxed{r_{\max}=52.311\ \tps}.
+\end{equation}
+
+\subsection{$L=262144$}
+由式~\eqref{eq:R}
+\begin{equation}
+R(262144)
+=15\,660\,093\,440+65\,536\times262\,144
+=32\,839\,962\,624\ \bytes/token.
+\end{equation}
+相邻整数证书给出
+\begin{equation}
+\boxed{
+\begin{aligned}
+800\text{ GB/s}:&\quad24.360\ \tps,\\
+819.2\text{ GB/s}:&\quad24.945\ \tps.
+\end{aligned}}
+\end{equation}
+
+\section{解释边界}
+
+本文没有把这些数值包装成无条件的“宇宙物理极限”。800 GB/s 是 Apple 公布的产品规格；819.2 GB/s 是更宽松的原始线速情景；式~\eqref{eq:staticvalue} 是由冻结 tensor 类别与编码公式得到的表示下界；式~\eqref{eq:bridge} 则是连接真实执行与数学模型的物理前提。
+
+如果未来证明一部分相关表示能够跨 token 稳定留在片上，使真实 DRAM 流量低于当前 $D(L,0)$，应提高参数 $C$ 后重新实例化定理。speculative decoding 与 MTP 同样不属于本结论的作用域，因为它们允许一次 target verification 对应多个最终输出 token，改变了计量关系。
+
+\section{形式验证}
+
+机器证明位于 \texttt{Proof.lean}。推荐验证命令为
+\begin{verbatim}
+lake build
+lake env leanchecker --fresh Problems.Qwen38M1UltraQ4.Proof
+lake env lean Problems/Qwen38M1UltraQ4/Proof.lean
+\end{verbatim}
+CI 还检查 \texttt{\#print axioms}，只允许 Lean 标准集合 $\{\texttt{propext},\texttt{Classical.choice},\texttt{Quot.sound}\}$ 的子集，并拒绝 \texttt{sorryAx} 与 \texttt{Lean.trustCompiler}。
+
+因此本文最终证明的是
+\[
+\boxed{
+\text{外部事实与物理前提}
+\Longrightarrow
+\text{上述离散吞吐上界}}
+\]
+而不是把外部事实本身伪装成 Lean 已证明的定理。
+
+\end{document}
